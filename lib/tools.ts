@@ -133,11 +133,16 @@ export const bahnTools = {
 
   getFares: tool({
     description:
-      'Preisauskunft für eine konkrete Verbindung aus planJourney (Normalpreis, CHF). Für „Was kostet …?" IMMER zuerst planJourney aufrufen und dann die fareRef der gewünschten Verbindung hier einsetzen.',
+      'Preisauskunft für eine konkrete Verbindung aus planJourney (CHF; Beta-Dienst, Angaben unverbindlich). Für „Was kostet …?" IMMER zuerst planJourney aufrufen und dann die fareRef der gewünschten Verbindung hier einsetzen. Unterstützt 1./2. Klasse und Halbtax.',
     inputSchema: z.object({
       fareRef: z.string().describe('Die fareRef einer Verbindung aus planJourney'),
+      travelClass: z
+        .enum(['first', 'second'])
+        .optional()
+        .describe('Klasse (Default: second = 2. Klasse)'),
+      halbtax: z.boolean().optional().describe('true = Preis mit Halbtax-Abo'),
     }),
-    execute: async ({ fareRef }) => getFares(fareRef),
+    execute: async ({ fareRef, travelClass, halbtax }) => getFares(fareRef, { travelClass, halbtax }),
   }),
 };
 

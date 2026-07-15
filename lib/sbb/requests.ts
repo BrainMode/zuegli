@@ -131,15 +131,64 @@ export function tripInfoRequest(journeyRef: string, operatingDayRef: string): st
       </OJPTripInfoRequest>`;
 }
 
-/**
- * Preisabfrage (BETA!) — läuft NICHT auf /ojp20, sondern auf einem separaten
- * Fare-Endpoint mit OJP-1.0-Envelope (invertierte Namespaces: Default = SIRI).
- * tripInnerXml ist der INHALT eines <Trip>…</Trip> aus einer TripDelivery;
- * die Namespaces werden am Wrapper neu deklariert, damit das 2.0-Fragment im
- * 1.0-Envelope gültig bleibt.
- */
-export function fareRequestEnvelope(tripInnerXml: string): string {
+// ── Preisabfrage (BETA, Integrationssystem) ─────────────────────────────────
+// Läuft NICHT auf /ojp20, sondern auf https://api.opentransportdata.swiss/ojpfare/
+// mit OJP-1.0-Envelope (invertierte Namespaces: Default = SIRI, ojp:-Prefix).
+// Dokumentierter Ablauf: 1) Der Fare-Service berechnet den Trip SELBST (eigener
+// OJPTripRequest im 1.0-Format), 2) der zurückgegebene <ojp:Trip> wird in einen
+// OJPFareRequest eingebettet. So bleiben die Formate konsistent (2.0-Trips vom
+// ojp20-Endpoint wären im 1.0-Schema ungültig).
+
+/** Schritt 1: 1.0-TripRequest an den Fare-Endpoint (UIC-Nummern, z.B. 8505000). */
+export function fareTripRequestEnvelope(fromUic: string, toUic: string, departure: Date): string {
   const now = stamp();
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<OJP xmlns="http://www.siri.org.uk/siri" xmlns:ojp="http://www.vdv.de/ojp" version="1.0">
+  <OJPRequest>
+    <ServiceRequest>
+      <RequestTimestamp>${now}</RequestTimestamp>
+      <RequestorRef>zuegli</RequestorRef>
+      <ojp:OJPTripRequest>
+        <RequestTimestamp>${now}</RequestTimestamp>
+        <ojp:Origin>
+          <ojp:PlaceRef>
+            <StopPointRef>${xmlEscape(fromUic)}</StopPointRef>
+            <ojp:LocationName><ojp:Text>-</ojp:Text></ojp:LocationName>
+          </ojp:PlaceRef>
+          <ojp:DepArrTime>${departure.toISOString()}</ojp:DepArrTime>
+        </ojp:Origin>
+        <ojp:Destination>
+          <ojp:PlaceRef>
+            <StopPointRef>${xmlEscape(toUic)}</StopPointRef>
+            <ojp:LocationName><ojp:Text>-</ojp:Text></ojp:LocationName>
+          </ojp:PlaceRef>
+        </ojp:Destination>
+        <ojp:Params>
+          <ojp:NumberOfResults>1</ojp:NumberOfResults>
+          <ojp:IncludeIntermediateStops>false</ojp:IncludeIntermediateStops>
+        </ojp:Params>
+      </ojp:OJPTripRequest>
+    </ServiceRequest>
+  </OJPRequest>
+</OJP>`;
+}
+
+export type FareOpts = { travelClass?: 'first' | 'second'; halbtax?: boolean };
+
+/** Schritt 2: FareRequest mit dem (1.0-)Trip aus Schritt 1. */
+export function fareRequestEnvelope(tripInnerXml: string, opts: FareOpts = {}): string {
+  const now = stamp();
+  const travelClass = opts.travelClass ?? 'second';
+  const entitlement = opts.halbtax
+    ? `
+            <ojp:EntitlementProducts>
+              <ojp:EntitlementProduct>
+                <ojp:FareAuthorityRef>ch:1:NOVA</ojp:FareAuthorityRef>
+                <ojp:EntitlementProductRef>HTA</ojp:EntitlementProductRef>
+                <ojp:EntitlementProductName>Halbtax-Abonnement</ojp:EntitlementProductName>
+              </ojp:EntitlementProduct>
+            </ojp:EntitlementProducts>`
+    : '';
   return `<?xml version="1.0" encoding="UTF-8"?>
 <OJP xmlns="http://www.siri.org.uk/siri" xmlns:ojp="http://www.vdv.de/ojp" version="1.0">
   <OJPRequest>
@@ -149,12 +198,16 @@ export function fareRequestEnvelope(tripInnerXml: string): string {
       <ojp:OJPFareRequest>
         <RequestTimestamp>${now}</RequestTimestamp>
         <ojp:TripFareRequest>
-          <ojp:Trip xmlns="http://www.vdv.de/ojp" xmlns:siri="http://www.siri.org.uk/siri">${tripInnerXml}</ojp:Trip>
+          <ojp:Trip>${tripInnerXml}</ojp:Trip>
         </ojp:TripFareRequest>
         <ojp:Params>
           <ojp:FareAuthorityFilter>ch:1:NOVA</ojp:FareAuthorityFilter>
           <ojp:PassengerCategory>Adult</ojp:PassengerCategory>
-          <ojp:TravelClass>second</ojp:TravelClass>
+          <ojp:TravelClass>${travelClass}</ojp:TravelClass>
+          <ojp:Traveller>
+            <ojp:Age>30</ojp:Age>
+            <ojp:PassengerCategory>Adult</ojp:PassengerCategory>${entitlement}
+          </ojp:Traveller>
         </ojp:Params>
       </ojp:OJPFareRequest>
     </ServiceRequest>

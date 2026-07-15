@@ -168,9 +168,19 @@ export function registerBahnMcpTools(server: McpServer) {
     {
       title: 'Preisauskunft',
       description:
-        'Preis (Normalpreis, CHF) für eine Verbindung aus planJourney — fareRef dort entnehmen.',
-      inputSchema: { fareRef: z.string().describe('fareRef aus planJourney') },
+        'Preis (CHF, Beta-Dienst, unverbindlich) für eine Verbindung aus planJourney — fareRef dort entnehmen. Optional 1. Klasse und Halbtax.',
+      inputSchema: {
+        fareRef: z.string().describe('fareRef aus planJourney'),
+        travelClass: z.enum(['first', 'second']).optional().describe('Klasse (Default second)'),
+        halbtax: z.boolean().optional().describe('true = mit Halbtax'),
+      },
     },
-    async ({ fareRef }) => asText(await getFares(fareRef as string)),
+    async ({ fareRef, travelClass, halbtax }) =>
+      asText(
+        await getFares(fareRef as string, {
+          travelClass: travelClass as 'first' | 'second' | undefined,
+          halbtax: halbtax as boolean | undefined,
+        }),
+      ),
   );
 }

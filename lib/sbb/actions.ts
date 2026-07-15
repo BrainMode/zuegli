@@ -15,7 +15,9 @@ import {
   stopEventRequest,
   tripRequest,
   tripInfoRequest,
+  fareTripRequestEnvelope,
   fareRequestEnvelope,
+  type FareOpts,
 } from './requests';
 import {
   formatPlaceResult,
@@ -212,13 +214,21 @@ export async function getArrivals(stationId: string, opts: BoardOpts = {}) {
 
 type JourneyOpts = { departure?: string; arrival?: string };
 
-/** Extrahiert die rohen <Trip>-Fragmente in Dokumentreihenfolge (für FareRequest). */
+/** Extrahiert die rohen <Trip>-Fragmente in Dokumentreihenfolge. */
 function rawTrips(rawXml: string): string[] {
   const out: string[] = [];
   const re = /<(?:\w+:)?Trip>([\s\S]*?)<\/(?:\w+:)?Trip>/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(rawXml)) !== null) out.push(m[1]);
   return out;
+}
+
+/** Für die Preisabfrage merken wir pro Verbindung nur die Eckdaten (nicht das XML). */
+type TripMeta = { fromId: string; toId: string; dep: string };
+
+function firstTimetabledTime(tripXml: string): string | null {
+  const m = /<(?:\w+:)?TimetabledTime>([^<]+)</.exec(tripXml);
+  return m ? m[1].trim() : null;
 }
 
 /** Verbindungssuche A→B mit Umstiegen. */
@@ -253,12 +263,14 @@ export async function planJourney(fromId: string, toId: string, opts: JourneyOpt
         results.map(async (r, i) => {
           const trip = (r as Record<string, unknown>).Trip as OjpTrip | undefined;
           const j = formatTrip(trip ?? {});
-          // Roh-Trip fürs (Beta-)Fare-Tool 15 Min vorhalten → fareRef.
+          // Eckdaten fürs (Beta-)Fare-Tool 1 h vorhalten → fareRef.
           let fareRef: string | null = null;
           const rawTrip = rawXmlTrips[i];
-          if (rawTrip) {
-            fareRef = createHash('sha1').update(rawTrip).digest('hex').slice(0, 12);
-            await cachePut(`tripxml:${fareRef}`, 900, rawTrip);
+          const dep = rawTrip ? firstTimetabledTime(rawTrip) : null;
+          if (dep) {
+            fareRef = createHash('sha1').update(`${fromId}|${toId}|${dep}`).digest('hex').slice(0, 12);
+            const meta: TripMeta = { fromId, toId, dep };
+            await cachePut(`tripmeta:${fareRef}`, 3600, meta);
           }
           return { ...j, fareRef };
         }),
@@ -445,38 +457,83 @@ export async function getDisruptions(filter?: string) {
   }
 }
 
-// ── 10) Preise (OJP Fare, BETA) ─────────────────────────────────────────────
+// ── 10) Preise (OJP Fare, BETA/Integrationssystem) ──────────────────────────
 
-/** Preisauskunft für eine Verbindung aus planJourney (via fareRef). */
-export async function getFares(fareRef: string) {
-  const endpoint = process.env.OTD_FARE_ENDPOINT;
-  if (!endpoint) {
-    return {
-      error: 'nicht_konfiguriert',
-      hint:
-        'Die Preisauskunft (OJP Fare, Beta) ist noch nicht aktiviert. Preise gibt es derzeit auf sbb.ch.',
-    };
+const FARE_ENDPOINT =
+  process.env.OTD_FARE_ENDPOINT ?? 'https://api.opentransportdata.swiss/ojpfare/';
+
+const FARE_NOT_SUBSCRIBED = {
+  error: 'nicht_konfiguriert',
+  hint:
+    'Die Preisauskunft ist noch nicht freigeschaltet — im API-Manager von opentransportdata.swiss muss das Produkt „OJP Fare" abonniert sein (Key dann als OTD_FARE_KEY). Preise gibt es derzeit auf sbb.ch.',
+};
+
+/** POST an den Fare-Endpoint (OJP 1.0). 401/403 = Produkt nicht abonniert. */
+async function farePost(body: string): Promise<string> {
+  const key = process.env.OTD_FARE_KEY ?? process.env.OTD_API_KEY;
+  if (!key) throw new OjpError('OTD_FARE_KEY fehlt', 'nicht_konfiguriert');
+  const res = await fetch(FARE_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/xml',
+      Authorization: `Bearer ${key}`,
+      'User-Agent': 'zuegli (open-source; github.com/BrainMode/zuegli)',
+    },
+    body,
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (res.status === 401 || res.status === 403) {
+    throw new OjpError('OJP-Fare-Produkt nicht abonniert', 'fare_abo');
   }
-  return cached(`fares:${fareRef}`, 3600, async () => {
+  if (!res.ok) throw new OjpError(`Fare HTTP ${res.status}`, 'http', res.status);
+  return res.text();
+}
+
+/** sloid → UIC: "ch:1:sloid:218" → "8500218" (Schweizer UIC = 85 + 5-stellig). */
+function sloidToUic(ref: string): string {
+  const m = /^ch:1:sloid:(\d+)/.exec(ref.trim());
+  if (!m) return ref.trim();
+  return `85${m[1].padStart(5, '0')}`;
+}
+
+/** Extrahiert das erste <Trip>-Fragment (prefix-agnostisch) aus einer 1.0-Antwort. */
+function firstRawTrip(xml: string): string | null {
+  const m = /<(\w+:)?Trip>([\s\S]*?)<\/\1?Trip>/.exec(xml);
+  return m ? m[2] : null;
+}
+
+/**
+ * Preisauskunft für eine Verbindung aus planJourney (via fareRef).
+ * Dokumentierter Beta-Ablauf: Der Fare-Service berechnet den Trip selbst
+ * (1.0-Format) und bepreist ihn dann — 2 Requests pro Abfrage, 1 h gecacht.
+ */
+export async function getFares(fareRef: string, opts: FareOpts = {}) {
+  const cls = opts.travelClass === 'first' ? 'first' : 'second';
+  const key = `fares:${fareRef}:${cls}:${opts.halbtax ? 'hta' : 'voll'}`;
+  return cached(key, 3600, async () => {
     try {
-      const tripXml = await cacheGet<string>(`tripxml:${fareRef}`);
-      if (!tripXml) {
+      const meta = await cacheGet<TripMeta>(`tripmeta:${fareRef}`);
+      if (!meta) {
         return {
           error: 'abgelaufen',
           hint: 'Diese Verbindung ist nicht mehr im Zwischenspeicher — bitte planJourney erneut aufrufen und die neue fareRef nutzen.',
         };
       }
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/xml',
-          Authorization: `Bearer ${process.env.OTD_FARE_KEY ?? process.env.OTD_API_KEY}`,
-        },
-        body: fareRequestEnvelope(tripXml),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!res.ok) throw new OjpError(`Fare HTTP ${res.status}`, 'http', res.status);
-      const doc = ojpParser.parse(await res.text()) as Record<string, any>;
+      // Schritt 1: Trip im 1.0-Format vom Fare-Service selbst berechnen lassen.
+      const dep = new Date(meta.dep);
+      const tripXmlRaw = await farePost(
+        fareTripRequestEnvelope(sloidToUic(meta.fromId), sloidToUic(meta.toId), dep),
+      );
+      const tripInner = firstRawTrip(tripXmlRaw);
+      if (!tripInner) {
+        return {
+          error: 'kein_trip',
+          hint: 'Der Preisdienst (Beta) konnte die Verbindung nicht nachrechnen — Preise derzeit auf sbb.ch.',
+        };
+      }
+      // Schritt 2: genau diesen Trip bepreisen.
+      const fareXml = await farePost(fareRequestEnvelope(tripInner, { travelClass: cls, halbtax: opts.halbtax }));
+      const doc = ojpParser.parse(fareXml) as Record<string, any>;
       const fareDelivery = doc?.OJP?.OJPResponse?.ServiceDelivery?.OJPFareDelivery;
       const products = arr(fareDelivery?.FareResult)
         .flatMap((fr) => arr((fr as Record<string, any>).TripFareResult))
@@ -487,15 +544,21 @@ export async function getFares(fareRef: string) {
             name: txt(prod.FareProductName),
             price: txt(prod.Price),
             currency: txt(prod.Currency) ?? 'CHF',
-            travelClass: txt(prod.TravelClass),
+            travelClass: txt(prod.TravelClass) ?? cls,
           };
         })
         .filter((p) => p.price != null);
       if (products.length === 0) {
         return { error: 'kein_preis', hint: 'Für diese Verbindung liefert der (Beta-)Preisdienst keinen Preis.' };
       }
-      return { products, note: 'Normalpreis ohne Halbtax/GA (Beta-Dienst, Angaben ohne Gewähr).' };
+      return {
+        products,
+        travelClass: cls,
+        halbtax: Boolean(opts.halbtax),
+        note: 'Beta-Preisdienst (Integrationsdaten) — Angaben unverbindlich.',
+      };
     } catch (err) {
+      if (err instanceof OjpError && err.code === 'fare_abo') return FARE_NOT_SUBSCRIBED;
       return toError('getFares', err);
     }
   });
