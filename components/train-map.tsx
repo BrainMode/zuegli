@@ -64,12 +64,16 @@ export default function TrainMap() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const tiersData = useRef<Map<number, { t: number; trains: TrainWithBBox[] }>>(new Map());
-  const activeTiers = useRef<Set<number>>(new Set([1]));
+  // Leer starten: ensureTiers() fetcht beim Map-Load alle zoom-relevanten Tiers
+  // (ein vorbefülltes Set würde den Initial-Fetch von Tier 1 unterdrücken).
+  const activeTiers = useRef<Set<number>>(new Set());
   const enabledRef = useRef<Record<number, boolean>>({ 1: true, 2: true, 3: true, 4: true });
   const viewBBox = useRef<[number, number, number, number]>([-180, -90, 180, 90]);
   const [enabled, setEnabled] = useState<Record<number, boolean>>({ 1: true, 2: true, 3: true, 4: true });
   const [stale, setStale] = useState(false);
   const [count, setCount] = useState(0);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+  const countRef = useRef(0);
 
   useEffect(() => {
     enabledRef.current = enabled;
@@ -87,16 +91,26 @@ export default function TrainMap() {
       attributionControl: { customAttribution: '© swisstopo · Daten: opentransportdata.swiss' },
     });
     mapRef.current = map;
+    // Fehler sichtbar machen (die Karte ist ihr eigener Debugger) — aber KEIN
+    // Hair-Trigger-Fallback: einzelne Tile-/Glyph-Fehler während des Style-
+    // Loads dürfen den Load-Zyklus nicht per setStyle verklemmen.
+    let usedFallback = false;
     map.on('error', (e) => {
-      // Vektorstil nicht ladbar → Raster-Fallback (einmalig).
-      if (!map.isStyleLoaded() && (e as { error?: { status?: number } }).error) {
+      const msg = (e as { error?: { message?: string } }).error?.message ?? 'unbekannter Kartenfehler';
+      console.error('[karte]', msg);
+      setErrMsg(msg);
+    });
+    const styleFallback = setTimeout(() => {
+      if (!map.isStyleLoaded() && !usedFallback) {
+        usedFallback = true;
+        setErrMsg(null);
         try {
           map.setStyle(RASTER_FALLBACK);
         } catch {
           /* noop */
         }
       }
-    });
+    }, 7000);
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 
     let raf = 0;
@@ -155,25 +169,42 @@ export default function TrainMap() {
       return a[0] <= v[2] && a[2] >= v[0] && a[1] <= v[3] && a[3] >= v[1];
     };
 
+    // Debug-Fenster (harmlos in Prod): Zustand des Render-Loops einsehbar.
+    const dbg = { frames: 0, srcMissing: 0, lastFeatures: 0, skipTier: 0, skipBBox: 0, skipPos: 0 };
+    (window as unknown as Record<string, unknown>).__zuegliDbg = dbg;
+
     const frame = (ts: number) => {
       raf = requestAnimationFrame(frame);
       if (ts - lastFrame < 100) return; // ~10 fps reicht für ruhige Bewegung
       lastFrame = ts;
       if (document.hidden) return;
+      dbg.frames++;
       const src = map.getSource('trains') as maplibregl.GeoJSONSource | undefined;
-      if (!src) return;
+      if (!src) {
+        dbg.srcMissing++;
+        return;
+      }
       const nowSec = Date.now() / 1000;
       const z = map.getZoom();
       const features: GeoJSON.Feature[] = [];
       for (const t of [1, 2, 3, 4]) {
-        if (z < TIER_MIN_ZOOM[t] || !enabledRef.current[t]) continue;
+        if (z < TIER_MIN_ZOOM[t] || !enabledRef.current[t]) {
+          dbg.skipTier++;
+          continue;
+        }
         const tier = tiersData.current.get(t);
         if (!tier) continue;
         for (const tr of tier.trains) {
           if (tr.x) continue; // ausgefallene Fahrten nicht zeichnen
-          if (!bboxIntersects(tr.bbox)) continue; // Viewport-Culling
+          if (!bboxIntersects(tr.bbox)) {
+            dbg.skipBBox++;
+            continue; // Viewport-Culling
+          }
           const pos = trainPosition(tr.c, nowSec);
-          if (!pos) continue;
+          if (!pos) {
+            dbg.skipPos++;
+            continue;
+          }
           features.push({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [pos.lon, pos.lat] },
@@ -188,12 +219,18 @@ export default function TrainMap() {
           });
         }
       }
-      setCount(features.length);
+      dbg.lastFeatures = features.length;
+      if (countRef.current !== features.length) {
+        countRef.current = features.length;
+        setCount(features.length);
+      }
       src.setData({ type: 'FeatureCollection', features });
     };
 
     map.on('load', () => {
       if (disposed) return;
+      clearTimeout(styleFallback);
+      setErrMsg(null);
       updateViewBBox();
       map.addSource('trains', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
       map.addLayer({
@@ -242,6 +279,7 @@ export default function TrainMap() {
 
     return () => {
       disposed = true;
+      clearTimeout(styleFallback);
       cancelAnimationFrame(raf);
       if (fetchTimer) clearInterval(fetchTimer);
       document.removeEventListener('visibilitychange', onVisible);
@@ -252,8 +290,10 @@ export default function TrainMap() {
   }, []);
 
   return (
-    <div className="flex min-h-dvh flex-col">
-      <header className="z-10 bg-[var(--zuegli-red)] shadow-md">
+    // h-dvh (nicht min-h!): flex-1 braucht eine echte Parent-Höhe, sonst
+    // kollabiert der absolute Karten-Container auf 0 (headless verifiziert).
+    <div className="flex h-dvh flex-col">
+      <header className="z-10 shrink-0 bg-[var(--zuegli-red)] shadow-md">
         <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
           <span className="zuegli-logo text-lg">Z</span>
           <div className="min-w-0 flex-1">
@@ -276,9 +316,16 @@ export default function TrainMap() {
           Datenstand älter als 3 Minuten — Positionen können abweichen.
         </div>
       )}
+      {errMsg && (
+        <div className="bg-red-100 px-4 py-1.5 text-center text-xs text-red-900">
+          Kartenfehler: {errMsg}
+        </div>
+      )}
 
-      <div className="relative flex-1">
-        <div ref={containerRef} className="absolute inset-0" />
+      <div className="relative min-h-0 flex-1">
+        {/* h-full statt absolute/inset: maplibre-CSS erzwingt position:relative
+            auf .maplibregl-map und schlägt Tailwinds absolute (Bundle-Reihenfolge) */}
+        <div ref={containerRef} className="h-full w-full" />
         {/* Filter-Chips + Legende */}
         <div className="absolute bottom-6 left-2 z-10 flex flex-col gap-1 rounded-lg bg-white/95 p-2 shadow-md">
           {[1, 2, 3, 4].map((t) => (
