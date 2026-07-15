@@ -12,7 +12,7 @@ Zügli ist die Schweizer Schwester-App von [Wo bleibt mein Zug?](https://github.
 - **Verbindungen A→B** mit Umstiegen, Verspätungen und Gleisen
 - **„Wo bleibt mein Zug?"** — Live-Zuglauf mit Verspätung pro Halt
 - **Wagenreihung mit Perronsektor** 🇨🇭 — wo hält welcher Wagen (1./2. Klasse, Speisewagen, Velohaken, Rollstuhlplätze), pro Halt mit Sektorangabe
-- **Belegungsprognose** 🇨🇭 — wie voll wird der Zug, je Abschnitt und Klasse (SBB, BLS, Thurbo, SOB)
+- **Belegungsprognose** 🇨🇭 — wie voll wird der Zug, je Abschnitt und Klasse (SBB, BLS, Thurbo, SOB). Ein täglicher Cron (`/api/cron/occupancy`, siehe `vercel.json`) importiert das ~140-MB-Tages-ZIP und legt kompakte Blobs (~1 MB) in Redis — braucht deshalb Upstash.
 - **Störungen** 🇨🇭 — landesweiter Echtzeit-Störungsfeed (SIRI-SX), gefiltert nach Strecke/Bahnhof
 - **Preisauskunft** (Beta) — Normalpreis in CHF für eine Verbindung
 - **100+ Sprachen** — fragt auf Deutsch, Französisch, Italienisch, Englisch, … und bekommt die Antwort in derselben Sprache

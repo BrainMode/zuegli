@@ -3,8 +3,9 @@
 // Aufruf: npm run smoke   (lädt .env.local via node --env-file)
 //
 // Sektionen: 1 Bahnhofssuche, 2 Abfahrten, 3 Verbindung, 4 Zuglauf,
-//            5 Wagenreihung, 6 Belegung, 7 Störungen (SIRI-SX).
+//            5 Wagenreihung, 6 Belegung (Dataset-Discovery), 7 Störungen.
 // Braucht OTD_API_KEY (gratis: https://api-manager.opentransportdata.swiss/).
+// Ein Fehler in einer Sektion bricht die anderen nicht ab.
 
 const KEY = process.env.OTD_API_KEY;
 if (!KEY) {
@@ -16,6 +17,17 @@ if (!KEY) {
 }
 
 const OJP = process.env.OTD_OJP_ENDPOINT ?? 'https://api.opentransportdata.swiss/ojp20';
+let failures = 0;
+
+async function section(title, fn) {
+  console.log(`\n${title}`);
+  try {
+    await fn();
+  } catch (err) {
+    failures++;
+    console.log(`   ❌ ${err.message}`);
+  }
+}
 
 async function ojp(serviceXml) {
   const now = new Date().toISOString();
@@ -40,16 +52,17 @@ async function ojp(serviceXml) {
   return text;
 }
 
-// Mini-Helfer: erstes Vorkommen eines Elements (prefix-agnostisch) als Text.
+// Mini-Helfer: erstes/alle Vorkommen eines Elements (prefix-agnostisch, mit
+// Wortgrenze — "Duration" matcht nicht "DurationText").
 function el(xml, name) {
-  const m = new RegExp(`<(?:\\w+:)?${name}[^>]*>([\\s\\S]*?)</(?:\\w+:)?${name}>`).exec(xml);
+  const m = new RegExp(`<(?:\\w+:)?${name}(?:\\s[^>]*)?>([\\s\\S]*?)</(?:\\w+:)?${name}>`).exec(xml ?? '');
   return m ? m[1].trim() : null;
 }
 function els(xml, name) {
   const out = [];
-  const re = new RegExp(`<(?:\\w+:)?${name}[^>]*>([\\s\\S]*?)</(?:\\w+:)?${name}>`, 'g');
+  const re = new RegExp(`<(?:\\w+:)?${name}(?:\\s[^>]*)?>([\\s\\S]*?)</(?:\\w+:)?${name}>`, 'g');
   let m;
-  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  while ((m = re.exec(xml ?? '')) !== null) out.push(m[1]);
   return out;
 }
 const textOf = (frag) => (frag == null ? null : (el(frag, 'Text') ?? frag).replace(/<[^>]+>/g, '').trim());
@@ -59,20 +72,27 @@ const hhmm = (iso) =>
     ? new Date(iso).toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Zurich' })
     : '–';
 
-console.log('1) LocationInformation("Olten") …');
-const lirXml = await ojp(`<OJPLocationInformationRequest>
+let olten = null;
+let firstJourneyRef = null;
+let firstDayRef = null;
+let firstTrainNumber = null;
+
+await section('1) LocationInformation("Olten") …', async () => {
+  const xml = await ojp(`<OJPLocationInformationRequest>
         <siri:RequestTimestamp>${now}</siri:RequestTimestamp>
         <InitialInput><Name>Olten</Name></InitialInput>
         <Restrictions><Type>stop</Type><NumberOfResults>3</NumberOfResults></Restrictions>
       </OJPLocationInformationRequest>`);
-for (const pr of els(lirXml, 'PlaceResult').slice(0, 3)) {
-  console.log(`   ${el(pr, 'StopPlaceRef')}  ${textOf(el(pr, 'StopPlaceName'))}`);
-}
-const olten = el(els(lirXml, 'PlaceResult')[0] ?? '', 'StopPlaceRef');
-if (!olten) throw new Error('Kein StopPlaceRef für Olten gefunden');
+  for (const pr of els(xml, 'PlaceResult').slice(0, 3)) {
+    console.log(`   ${el(pr, 'StopPlaceRef')}  ${textOf(el(pr, 'StopPlaceName'))}`);
+  }
+  olten = el(els(xml, 'PlaceResult')[0] ?? '', 'StopPlaceRef');
+  if (!olten) throw new Error('Kein StopPlaceRef für Olten gefunden');
+});
 
-console.log('\n2) StopEvents(Olten, departures) …');
-const serXml = await ojp(`<OJPStopEventRequest>
+await section('2) StopEvents(Olten, departures) …', async () => {
+  if (!olten) throw new Error('übersprungen (Sektion 1 fehlgeschlagen)');
+  const xml = await ojp(`<OJPStopEventRequest>
         <siri:RequestTimestamp>${now}</siri:RequestTimestamp>
         <Location>
           <PlaceRef><siri:StopPointRef>${olten}</siri:StopPointRef><Name><Text>Olten</Text></Name></PlaceRef>
@@ -86,35 +106,32 @@ const serXml = await ojp(`<OJPStopEventRequest>
           <UseRealtimeData>full</UseRealtimeData>
         </Params>
       </OJPStopEventRequest>`);
-let firstJourneyRef = null;
-let firstDayRef = null;
-let firstTrainNumber = null;
-for (const se of els(serXml, 'StopEvent').slice(0, 6)) {
-  const line = textOf(el(se, 'PublishedServiceName'));
-  const dest = textOf(el(se, 'DestinationText'));
-  const dep = el(se, 'ServiceDeparture');
-  const plan = el(dep ?? '', 'TimetabledTime');
-  const est = el(dep ?? '', 'EstimatedTime');
-  const quay = textOf(el(se, 'EstimatedQuay') ?? el(se, 'PlannedQuay'));
-  const trainNo = el(se, 'TrainNumber');
-  if (!firstJourneyRef) {
-    firstJourneyRef = el(se, 'JourneyRef');
-    firstDayRef = el(se, 'OperatingDayRef');
-    firstTrainNumber = trainNo;
+  for (const se of els(xml, 'StopEvent').slice(0, 6)) {
+    const dep = el(se, 'ServiceDeparture');
+    const plan = el(dep, 'TimetabledTime');
+    const est = el(dep, 'EstimatedTime');
+    const quay = textOf(el(se, 'EstimatedQuay') ?? el(se, 'PlannedQuay'));
+    const trainNo = el(se, 'TrainNumber');
+    if (!firstJourneyRef) {
+      firstJourneyRef = el(se, 'JourneyRef');
+      firstDayRef = el(se, 'OperatingDayRef');
+      firstTrainNumber = trainNo;
+    }
+    console.log(
+      `   ${String(textOf(el(se, 'PublishedServiceName')) ?? '?').padEnd(6)} → ${textOf(el(se, 'DestinationText'))}  plan ${hhmm(plan)}  ist ${hhmm(est ?? plan)}  Gl. ${quay ?? '–'}  Nr. ${trainNo ?? '–'}`,
+    );
   }
-  console.log(
-    `   ${String(line ?? '?').padEnd(6)} → ${dest}  plan ${hhmm(plan)}  ist ${hhmm(est ?? plan)}  Gl. ${quay ?? '–'}  Nr. ${trainNo ?? '–'}`,
-  );
-}
+});
 
-console.log('\n3) Trip(Olten → Bern) …');
-const bernXml = await ojp(`<OJPLocationInformationRequest>
+await section('3) Trip(Olten → Bern) …', async () => {
+  if (!olten) throw new Error('übersprungen');
+  const bernXml = await ojp(`<OJPLocationInformationRequest>
         <siri:RequestTimestamp>${now}</siri:RequestTimestamp>
         <InitialInput><Name>Bern</Name></InitialInput>
         <Restrictions><Type>stop</Type><NumberOfResults>1</NumberOfResults></Restrictions>
       </OJPLocationInformationRequest>`);
-const bern = el(els(bernXml, 'PlaceResult')[0] ?? '', 'StopPlaceRef');
-const trXml = await ojp(`<OJPTripRequest>
+  const bern = el(els(bernXml, 'PlaceResult')[0] ?? '', 'StopPlaceRef');
+  const xml = await ojp(`<OJPTripRequest>
         <siri:RequestTimestamp>${now}</siri:RequestTimestamp>
         <Origin>
           <PlaceRef><siri:StopPointRef>${olten}</siri:StopPointRef><Name><Text>Olten</Text></Name></PlaceRef>
@@ -129,21 +146,22 @@ const trXml = await ojp(`<OJPTripRequest>
           <UseRealtimeData>full</UseRealtimeData>
         </Params>
       </OJPTripRequest>`);
-for (const trip of els(trXml, 'Trip').slice(0, 2)) {
-  const legs = els(trip, 'TimedLeg')
-    .map((l) => {
-      const line = textOf(el(l, 'PublishedServiceName'));
-      const board = el(l, 'LegBoard');
-      const alight = el(l, 'LegAlight');
-      return `${line} ${textOf(el(board ?? '', 'StopPointName'))} ${hhmm(el(board ?? '', 'TimetabledTime'))} → ${textOf(el(alight ?? '', 'StopPointName'))} ${hhmm(el(alight ?? '', 'TimetabledTime'))}`;
-    })
-    .join('  |  ');
-  console.log(`   [${el(trip, 'Duration')}] ${legs}`);
-}
+  for (const result of els(xml, 'TripResult').slice(0, 2)) {
+    const trip = el(result, 'Trip');
+    const legs = els(trip, 'TimedLeg')
+      .map((l) => {
+        const board = el(l, 'LegBoard');
+        const alight = el(l, 'LegAlight');
+        return `${textOf(el(l, 'PublishedServiceName'))} ${textOf(el(board, 'StopPointName'))} ${hhmm(el(board, 'TimetabledTime'))} → ${textOf(el(alight, 'StopPointName'))} ${hhmm(el(alight, 'TimetabledTime'))}`;
+      })
+      .join('  |  ');
+    console.log(`   [${el(trip, 'Duration')}] ${legs}`);
+  }
+});
 
-console.log('\n4) TripInfo(erster Zug aus 2) …');
-if (firstJourneyRef && firstDayRef) {
-  const tiXml = await ojp(`<OJPTripInfoRequest>
+await section('4) TripInfo(erster Zug aus 2) …', async () => {
+  if (!firstJourneyRef || !firstDayRef) throw new Error('kein JourneyRef aus Sektion 2');
+  const xml = await ojp(`<OJPTripInfoRequest>
         <siri:RequestTimestamp>${now}</siri:RequestTimestamp>
         <JourneyRef>${firstJourneyRef}</JourneyRef>
         <OperatingDayRef>${firstDayRef}</OperatingDayRef>
@@ -153,70 +171,76 @@ if (firstJourneyRef && firstDayRef) {
           <IncludeService>true</IncludeService>
         </Params>
       </OJPTripInfoRequest>`);
-  const calls = [...els(tiXml, 'PreviousCall'), ...els(tiXml, 'OnwardCall')];
+  const calls = [...els(xml, 'PreviousCall'), ...els(xml, 'OnwardCall')];
   console.log(`   ${calls.length} Halte:`);
   for (const c of calls.slice(0, 8)) {
     console.log(
-      `     ${String(textOf(el(c, 'StopPointName')) ?? '?').padEnd(28)} an ${hhmm(el(el(c, 'ServiceArrival') ?? '', 'TimetabledTime'))}  ab ${hhmm(el(el(c, 'ServiceDeparture') ?? '', 'TimetabledTime'))}  Gl. ${textOf(el(c, 'EstimatedQuay') ?? el(c, 'PlannedQuay')) ?? '–'}`,
+      `     ${String(textOf(el(c, 'StopPointName')) ?? '?').padEnd(28)} an ${hhmm(el(el(c, 'ServiceArrival'), 'TimetabledTime'))}  ab ${hhmm(el(el(c, 'ServiceDeparture'), 'TimetabledTime'))}  Gl. ${textOf(el(c, 'EstimatedQuay') ?? el(c, 'PlannedQuay')) ?? '–'}`,
     );
   }
-} else {
-  console.log('   Kein JourneyRef aus Sektion 2 — übersprungen.');
-}
+});
 
-console.log('\n5) Formation (Wagenreihung) …');
-const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Zurich' });
-const fKey = process.env.OTD_FORMATION_KEY ?? KEY;
-if (firstTrainNumber) {
-  const fRes = await fetch(
+await section('5) Formation (Wagenreihung) …', async () => {
+  if (!firstTrainNumber) throw new Error('keine Zugnummer aus Sektion 2');
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Zurich' });
+  const fKey = process.env.OTD_FORMATION_KEY ?? KEY;
+  const res = await fetch(
     `https://api.opentransportdata.swiss/formation/v2/formations_full?evu=SBBP&operationDate=${today}&trainNumber=${firstTrainNumber}`,
     { headers: { Authorization: `Bearer ${fKey}` } },
   );
-  if (fRes.ok) {
-    const f = await fRes.json();
-    const stops = f.scheduledStops ?? [];
-    const vehicles = f.formationVehicles ?? f.vehicles ?? [];
-    console.log(`   Zug ${firstTrainNumber}: ${vehicles.length} Wagen, ${stops.length} Halte`);
-    if (stops[0]) console.log(`   1. Halt: ${stops[0].stopPoint?.name}  Gleis ${stops[0].track?.text ?? '–'}  Sektoren: ${stops[0].formationShortString ?? '–'}`);
-    if (vehicles[0]) console.log(`   1. Wagen (Felder): ${Object.keys(vehicles[0].vehicleProperties ?? vehicles[0]).join(', ')}`);
-  } else {
-    console.log(`   HTTP ${fRes.status} — ${(await fRes.text()).slice(0, 200)}`);
-    console.log('   (Formation evtl. separates API-Produkt → OTD_FORMATION_KEY setzen, oder Zug ist kein SBBP-Zug.)');
+  if (!res.ok) {
+    throw new Error(
+      `HTTP ${res.status} — ${(await res.text()).slice(0, 150)} ` +
+        '(Formation ist ein SEPARATES API-Produkt im API-Manager → abonnieren bzw. OTD_FORMATION_KEY setzen; oder der Zug ist kein SBBP-Zug.)',
+    );
   }
-} else {
-  console.log('   Keine Zugnummer aus Sektion 2 — übersprungen.');
-}
+  const f = await res.json();
+  const stops = f.scheduledStops ?? [];
+  const vehicles = f.formationVehicles ?? f.vehicles ?? [];
+  console.log(`   Zug ${firstTrainNumber}: ${vehicles.length} Wagen, ${stops.length} Halte`);
+  if (stops[0])
+    console.log(
+      `   1. Halt: ${stops[0].stopPoint?.name}  Gleis ${stops[0].track?.text ?? '–'}  Sektoren: ${stops[0].formationShortString ?? '–'}`,
+    );
+  if (vehicles[0])
+    console.log(`   1. Wagen (Felder): ${Object.keys(vehicles[0].vehicleProperties ?? vehicles[0]).join(', ')}`);
+});
 
-console.log('\n6) Belegungsprognose (CKAN) …');
-const pkg = await (
-  await fetch('https://data.opentransportdata.swiss/api/3/action/package_show?id=occupancy-forecast-json-dataset')
-).json();
-const resources = pkg?.result?.resources ?? [];
-console.log(`   ${resources.length} Ressourcen; Beispiele: ${resources.slice(0, 3).map((r) => r.name).join(', ')}`);
-const sbbToday = resources.find((r) => /(^|[^0-9])11[_-]/.test(String(r.name)) && String(r.name).includes(today));
-if (sbbToday) {
-  const occ = await (await fetch(sbbToday.url)).json();
-  console.log(`   SBB heute: ${occ.trains?.length ?? 0} Züge; Felder train[0]: ${Object.keys(occ.trains?.[0] ?? {}).join(', ')}`);
-} else {
-  console.log(`   Keine SBB-Datei (11_${today}) gefunden — Namensmuster prüfen!`);
-}
+await section('6) Belegungsprognose (Dataset-Discovery) …', async () => {
+  // Der 140-MB-Download läuft im täglichen Cron (/api/cron/occupancy), nicht
+  // hier — der Smoke prüft nur, dass die ZIP-URL auffindbar ist.
+  const page = await fetch(
+    'https://data.opentransportdata.swiss/dataset/occupancy-forecast-json-dataset',
+    { headers: { 'User-Agent': 'Mozilla/5.0 zuegli-smoke' } },
+  );
+  if (!page.ok) throw new Error(`Dataset-Seite HTTP ${page.status}`);
+  const html = await page.text();
+  const m = /href="(https:\/\/data\.opentransportdata\.swiss\/[^"]*\/download\/[^"]*\.zip)"/i.exec(html);
+  if (!m) throw new Error('Keine ZIP-URL gefunden — Discovery in lib/sbb/occupancy.ts anpassen!');
+  console.log(`   ZIP gefunden: ${m[1].split('/').pop()}`);
+  console.log('   Import lokal testen: Server starten und GET /api/cron/occupancy aufrufen.');
+});
 
-console.log('\n7) SIRI-SX (Störungen, unplanned) …');
-const sxKey = process.env.OTD_SIRI_SX_KEY ?? KEY;
-const sxRes = await fetch(
-  process.env.OTD_SIRI_SX_URL ?? 'https://api.opentransportdata.swiss/la/siri-sx-unplanned',
-  { headers: { Authorization: `Bearer ${sxKey}` } },
-);
-if (sxRes.ok) {
-  const sx = await sxRes.text();
+await section('7) SIRI-SX (Störungen, unplanned) …', async () => {
+  const sxKey = process.env.OTD_SIRI_SX_KEY ?? KEY;
+  const res = await fetch(
+    process.env.OTD_SIRI_SX_URL ?? 'https://api.opentransportdata.swiss/la/siri-sx-unplanned',
+    { headers: { Authorization: `Bearer ${sxKey}` } },
+  );
+  if (!res.ok) {
+    throw new Error(
+      `HTTP ${res.status} — ${(await res.text()).slice(0, 150)} ` +
+        '(SIRI-SX ist ein SEPARATES API-Produkt im API-Manager → abonnieren bzw. OTD_SIRI_SX_KEY setzen.)',
+    );
+  }
+  const sx = await res.text();
   const situations = els(sx, 'PtSituationElement');
   console.log(`   ${situations.length} Situationen`);
   if (situations[0]) {
-    console.log(`   Erste: ${textOf(el(situations[0], 'Summary'))} (Severity: ${el(situations[0], 'Severity') ?? '–'})`);
+    console.log(
+      `   Erste: ${textOf(el(situations[0], 'Summary'))} (Severity: ${el(situations[0], 'Severity') ?? '–'})`,
+    );
   }
-} else {
-  console.log(`   HTTP ${sxRes.status} — ${(await sxRes.text()).slice(0, 200)}`);
-  console.log('   (SIRI-SX evtl. separates API-Produkt → OTD_SIRI_SX_KEY setzen.)');
-}
+});
 
-console.log('\n✅ Smoke-Test durchgelaufen.');
+console.log(failures === 0 ? '\n✅ Alle Sektionen OK.' : `\n⚠️ ${failures} Sektion(en) mit Problemen (Details oben).`);
