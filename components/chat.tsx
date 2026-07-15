@@ -40,22 +40,22 @@ export function Chat({ imprintUrl }: { imprintUrl?: string | null }) {
 
   return (
     <div className="flex min-h-dvh flex-col bg-[var(--bg)]">
-      {/* Kopfzeile im DB-Stil */}
-      <header className="sticky top-0 z-10 border-b border-[var(--border)] bg-white/95 backdrop-blur">
+      {/* Kopfzeile im SBB-Mobile-Stil: roter App-Header, weisse Schrift */}
+      <header className="sticky top-0 z-10 bg-[var(--zuegli-red)] shadow-md">
         <div className="mx-auto flex max-w-3xl items-center gap-3 px-4 py-3">
           <span className="zuegli-logo text-lg">Z</span>
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-[17px] font-bold text-[var(--ink)]">Zügli</h1>
-            <p className="truncate text-xs text-[var(--muted)]">{s.tagline}</p>
+            <h1 className="truncate text-[17px] font-bold text-white">Zügli</h1>
+            <p className="truncate text-xs text-white/85">{s.tagline}</p>
           </div>
-          <span className="hidden shrink-0 rounded-full bg-[var(--panel)] px-2.5 py-1 text-[11px] font-semibold text-[var(--muted)] sm:inline">
+          <span className="hidden shrink-0 rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-semibold text-white sm:inline">
             🌍 {s.langBadge}
           </span>
           <select
             aria-label="Sprache / Language"
             value={lang}
             onChange={(e) => setLang(e.target.value as Lang)}
-            className="shrink-0 rounded-md border border-[var(--border)] bg-white px-2 py-1.5 text-sm text-[var(--ink)] focus:border-[var(--zuegli-red)] focus:outline-none"
+            className="shrink-0 rounded-md border border-white/40 bg-white px-2 py-1.5 text-sm text-[var(--ink)] focus:border-white focus:outline-none"
           >
             {LANGS.map((l) => (
               <option key={l.code} value={l.code}>

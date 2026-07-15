@@ -1,8 +1,8 @@
 import { ImageResponse } from 'next/og';
 
-// Statisches Share-Bild (LinkedIn/X). Bewusst dunkel und OHNE SBB-Farbwelt/
-// SBB-Logo/Schweizer Kreuz — neutrales Design, damit die Vorschau share-tauglich
-// und markenrechtlich unbedenklich ist.
+// Statisches Share-Bild (LinkedIn/X) im SBB-angelehnten Look: rotes Lockup,
+// weisse Schrift. Bewusst NICHT SBB-Rot #EB0000, kein Doppelpfeil, kein
+// Schweizer Kreuz — share-tauglich und markenrechtlich unbedenklich.
 export const size = { width: 1200, height: 630 };
 export const contentType = 'image/png';
 export const alt = 'Zügli — KI-Bahnauskunft für die Schweiz (inoffiziell)';
@@ -18,39 +18,45 @@ export default function OpengraphImage() {
           flexDirection: 'column',
           justifyContent: 'center',
           padding: '90px',
-          background: 'linear-gradient(135deg, #0b1220 0%, #131b2b 100%)',
+          background: '#e00514',
           color: '#ffffff',
-          fontFamily: 'sans-serif',
+          fontFamily: 'Helvetica, Arial, sans-serif',
         }}
       >
         <div
           style={{
-            fontSize: 34,
-            letterSpacing: 8,
-            color: '#7d8aa0',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 76,
+            height: 76,
+            background: '#ffffff',
+            color: '#e00514',
+            fontSize: 48,
             fontWeight: 700,
+            borderRadius: 8,
           }}
         >
-          🚂
+          Z
         </div>
         <div
           style={{
-            fontSize: 104,
+            fontSize: 110,
             fontWeight: 700,
             lineHeight: 1.02,
-            marginTop: 20,
+            marginTop: 24,
             display: 'flex',
           }}
         >
           Zügli
         </div>
-        <div style={{ fontSize: 44, color: '#b9c2d0', marginTop: 30, display: 'flex' }}>
+        <div style={{ fontSize: 42, color: 'rgba(255,255,255,0.92)', marginTop: 26, display: 'flex' }}>
           KI-Bahnauskunft für die Schweiz — inoffiziell
         </div>
         <div
           style={{
-            fontSize: 28,
-            color: '#5f6b80',
+            fontSize: 27,
+            color: 'rgba(255,255,255,0.75)',
             marginTop: 'auto',
             display: 'flex',
             gap: 16,

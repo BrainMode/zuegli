@@ -12,12 +12,12 @@ export default function DatenschutzPage() {
 
   return (
     <div className="min-h-dvh bg-[var(--bg)]">
-      <header className="border-b border-[var(--border)] bg-white">
+      <header className="bg-[var(--zuegli-red)] shadow-md">
         <div className="mx-auto flex max-w-2xl items-center gap-3 px-4 py-3">
           <Link href="/" className="zuegli-logo text-base">
             Z
           </Link>
-          <span className="text-sm text-[var(--muted)]">Datenschutz</span>
+          <span className="text-sm font-semibold text-white">Zügli · Datenschutz</span>
         </div>
       </header>
 

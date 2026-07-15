@@ -1,21 +1,23 @@
 @import 'tailwindcss';
 
 /*
-  Design-Sprache angelehnt an die Schweizer Bahnwelt (satirischer Seitenhieb).
-  WICHTIG (rechtlich): Farbe ist BEWUSST NICHT das SBB-Rot #EB0000, sondern ein
-  leicht abweichendes Signalrot. Keine SBB-Marke, kein SBB-Logo, KEIN Schweizer
-  Kreuz (wappenschutzrechtlich heikel), eigener „Zügli"-Schriftzug, klarer
-  Disclaimer. Parodie/Satire.
+  Design-Sprache angelehnt an die SBB (satirischer Seitenhieb): roter App-
+  Header wie SBB Mobile, Anthrazit/Milchgrau-Töne wie digital.sbb.ch.
+  WICHTIG (rechtlich): Farbe ist BEWUSST NICHT das SBB-Rot #EB0000, sondern
+  ein leicht abweichendes Signalrot. Keine SBB-Marke, kein Doppelpfeil-Logo,
+  KEINE SBB-Schrift (lizenziert), KEINE Bahnhofsuhr (Formmarke), KEIN
+  Schweizer Kreuz (wappenschutzrechtlich heikel), eigener „Zügli"-Schriftzug,
+  klarer Disclaimer. Parodie/Satire.
 */
 :root {
-  --zuegli-red: #d61e2c; /* eigenes Rot, nicht SBB #EB0000 */
-  --zuegli-red-dark: #a91622;
-  --ink: #1a2029; /* bahniges Dunkelgrau */
-  --muted: #646973;
-  --bg: #ffffff;
-  --panel: #f0f3f5; /* helles Bahn-Grau */
-  --panel-2: #e7ebef;
-  --border: #d7dce1;
+  --zuegli-red: #e00514; /* eigenes Rot, nicht SBB #EB0000 */
+  --zuegli-red-dark: #b8000f; /* dunkles Rot, nicht SBB Red125 #C60018 */
+  --ink: #212121; /* Anthrazit/Charcoal */
+  --muted: #686868; /* Granit */
+  --bg: #f6f6f6; /* Milchgrau — Karten heben sich weiss ab */
+  --panel: #f6f6f6;
+  --panel-2: #e5e5e5; /* Cloud */
+  --border: #d2d2d2; /* Aluminium */
   color-scheme: light;
 }
 
@@ -69,17 +71,18 @@ body {
   border-radius: 8px;
 }
 
-/* Zügli-Logo-Kasten — Anspielung auf rote Bahn-Logokästen, aber eigener Schriftzug. */
+/* Zügli-Logo-Kasten — weisser Kasten mit rotem „Z" auf dem roten Header
+   (Anspielung auf Bahn-Signaletik, bewusst OHNE SBB-Doppelpfeil). */
 .zuegli-logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--zuegli-red);
-  color: #fff;
+  background: #fff;
+  color: var(--zuegli-red);
   font-weight: 800;
   letter-spacing: 0.04em;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 0.28em 0.5em;
   line-height: 1;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }

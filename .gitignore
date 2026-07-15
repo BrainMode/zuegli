@@ -29,3 +29,6 @@ skills-lock.json
 
 # Private Notizen / Entwürfe — NICHT ins öffentliche Repo
 _private/
+
+.vercel
+.env*
