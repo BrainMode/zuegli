@@ -16,7 +16,8 @@ const FORMATION_BASE =
   process.env.OTD_FORMATION_BASE ?? 'https://api.opentransportdata.swiss/formation/v2';
 
 // EVUs mit Formationsdaten; SBBP zuerst, dann die wahrscheinlichsten anderen.
-const EVU_FALLBACKS = ['SBBP', 'THURBO', 'BLSP', 'SOB'] as const;
+// ZB (Zentralbahn) liefert ebenfalls — z.B. Stans/Engelberg/Interlaken-Züge.
+const EVU_FALLBACKS = ['SBBP', 'THURBO', 'BLSP', 'SOB', 'ZB'] as const;
 
 type Json = Record<string, any>;
 
@@ -161,7 +162,8 @@ function parseFormation(
       atStops[stopIdx] ??
       atStops.find((a: Json) => String(a.stopPoint?.name ?? '') === chosenName);
     return {
-      wagen: v.number != null ? Number(v.number) : null,
+      // Manche EVUs (z.B. ZB) führen keine Kunden-Wagennummern → number ist 0.
+      wagen: v.number != null && Number(v.number) > 0 ? Number(v.number) : null,
       position: v.position != null ? Number(v.position) : null,
       klasse: carClass(p),
       sektor: atChosen?.sectors != null ? String(atChosen.sectors) : null,

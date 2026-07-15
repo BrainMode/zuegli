@@ -62,7 +62,7 @@ export const bahnTools = {
 
   planJourney: tool({
     description:
-      'Sucht Zugverbindungen von A nach B inkl. Umstiegen, Verspätungen, Gleisen und Ausstattung (amenities). DAS Standard-Tool für JEDE Anfrage mit Start UND Ziel — auch wenn sie wie eine Abfahrtsfrage klingt („wann fährt der Zug von X nach Y", „nächster Zug von X nach Y ab 16 Uhr"). Findet auch Direktverbindungen, bei denen das Ziel nur ein Zwischenhalt ist. Liefert je Verbindung eine fareRef für getFares (Preis). Benötigt die Bahnhofs-IDs aus searchStations; departure/arrival als ISO-Zeitpunkt für konkrete Zeiten.',
+      'Sucht Zugverbindungen von A nach B inkl. Umstiegen, Verspätungen, Gleisen und Ausstattung (amenities). DAS Standard-Tool für JEDE Anfrage mit Start UND Ziel — auch wenn sie wie eine Abfahrtsfrage klingt („wann fährt der Zug von X nach Y", „nächster Zug von X nach Y ab 16 Uhr"). Findet auch Direktverbindungen, bei denen das Ziel nur ein Zwischenhalt ist. Zeiten: dep/arr sind GEPLANTE Zeiten (wie auf der Anzeigetafel), depReal/arrReal die Echtzeit-Prognose, delayMin die Verspätung. Liefert je Verbindung eine fareRef für getFares (Preis). Benötigt die Bahnhofs-IDs aus searchStations; departure/arrival als ISO-Zeitpunkt für konkrete Zeiten.',
     inputSchema: z.object({
       fromId: z.string().describe('id des Start-Bahnhofs'),
       toId: z.string().describe('id des Ziel-Bahnhofs'),

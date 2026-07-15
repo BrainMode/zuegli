@@ -231,6 +231,8 @@ export type OjpTrip = {
   Leg?: OjpLeg | OjpLeg[];
 };
 
+// dep/arr sind GEPLANTE Zeiten (wie auf Anzeigetafeln/sbb.ch); depReal/arrReal
+// die Echtzeit-Prognose (null = keine Echtzeitdaten bzw. pünktlich).
 export type JourneyLeg = {
   line: string;
   trainNumber: string | null;
@@ -238,10 +240,12 @@ export type JourneyLeg = {
   from: string;
   fromPlatform: string | null;
   dep: string | null;
+  depReal: string | null;
   depDelayMin: number | null;
   to: string;
   toPlatform: string | null;
   arr: string | null;
+  arrReal: string | null;
   arrDelayMin: number | null;
   cancelled: boolean;
   tripId: string | null;
@@ -250,8 +254,10 @@ export type JourneyLeg = {
 
 export function formatTrip(trip: OjpTrip): {
   departure: string | null;
+  departureReal: string | null;
   departureDelayMin: number | null;
   arrival: string | null;
+  arrivalReal: string | null;
   arrivalDelayMin: number | null;
   transfers: number;
   durationMin: number | null;
@@ -276,11 +282,13 @@ export function formatTrip(trip: OjpTrip): {
       direction: txt(service.DestinationText) ?? '?',
       from: txt(board.StopPointName) ?? '?',
       fromPlatform: txt(board.EstimatedQuay) ?? txt(board.PlannedQuay) ?? null,
-      dep: hhmm(depE ?? depT),
+      dep: hhmm(depT),
+      depReal: depE ? hhmm(depE) : null,
       depDelayMin: delayMinFromTimes(depT, depE),
       to: txt(alight.StopPointName) ?? '?',
       toPlatform: txt(alight.EstimatedQuay) ?? txt(alight.PlannedQuay) ?? null,
-      arr: hhmm(arrE ?? arrT),
+      arr: hhmm(arrT),
+      arrReal: arrE ? hhmm(arrE) : null,
       arrDelayMin: delayMinFromTimes(arrT, arrE),
       cancelled: String(service.Cancelled) === 'true',
       tripId: makeTripId(service),
@@ -292,8 +300,10 @@ export function formatTrip(trip: OjpTrip): {
   const last = legs[legs.length - 1];
   return {
     departure: first?.dep ?? null,
+    departureReal: first?.depReal ?? null,
     departureDelayMin: first?.depDelayMin ?? null,
     arrival: last?.arr ?? null,
+    arrivalReal: last?.arrReal ?? null,
     arrivalDelayMin: last?.arrDelayMin ?? null,
     transfers: Math.max(0, legs.length - 1),
     durationMin: isoDurationMin(txt(trip.Duration)),
@@ -301,12 +311,13 @@ export function formatTrip(trip: OjpTrip): {
   };
 }
 
-/** "PT1H48M" → 108 Minuten. */
+/** "PT1H48M30S" → 109 Minuten (Sekunden werden gerundet, nicht abgeschnitten). */
 export function isoDurationMin(d: string | null): number | null {
   if (!d) return null;
-  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?/.exec(d);
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?/.exec(d);
   if (!m) return null;
-  return Number(m[1] ?? 0) * 60 + Number(m[2] ?? 0);
+  const seconds = Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0);
+  return Math.round(seconds / 60);
 }
 
 // ── TripInfo (Zuglauf) ──────────────────────────────────────────────────────
