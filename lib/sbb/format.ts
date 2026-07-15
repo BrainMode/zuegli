@@ -25,6 +25,30 @@ export function parseZurich(s: string): Date {
   return new Date(asUtc.getTime() - offsetMs);
 }
 
+/**
+ * Tolerantes Parsen von Nutzer-/Modell-Zeitangaben: ISO (mit/ohne Offset),
+ * blosse Uhrzeit "17:00" (→ heute, Zürich), deutsches Datum "15.07.2026 17:00".
+ * null = nicht verstanden (Aufrufer gibt dann einen klaren Hinweis statt eines
+ * irreführenden „API antwortet nicht").
+ */
+export function parseTimeInput(s: string): Date | null {
+  const t = s.trim();
+  if (!t) return null;
+  if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t)) {
+    const today = new Date().toLocaleDateString('sv-SE', { timeZone: TZ });
+    const d = parseZurich(`${today}T${t.length === 4 ? '0' + t : t}`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const dm = /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[T ](\d{1,2}:\d{2}(?::\d{2})?))?$/.exec(t);
+  if (dm) {
+    const time = dm[4] ? (dm[4].length === 4 ? '0' + dm[4] : dm[4]) : '00:00';
+    const d = parseZurich(`${dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}T${time}`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = parseZurich(t);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 export function hhmm(iso: string | null | undefined): string | null {
   if (!iso) return null;
   const d = new Date(iso);

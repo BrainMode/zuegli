@@ -210,8 +210,13 @@ export async function occupancyForecast(
         'Die Belegungsdaten für diesen Tag sind (noch) nicht geladen — der tägliche Datenimport läuft noch nicht oder Redis ist nicht konfiguriert. Prognosen gibt es zudem nur für heute/morgen.',
     };
   }
+  const looksLikeLine = /[a-z]/i.test(trainNumber.trim());
   return {
     error: 'nicht_gefunden',
-    hint: `Für Zug ${num} am ${date} gibt es keine Belegungsprognose (nur SBB, BLS, Thurbo, SOB).`,
+    hint:
+      `Für Zug ${num} am ${date} gibt es keine Belegungsprognose (nur SBB, BLS, Thurbo, SOB).` +
+      (looksLikeLine
+        ? ` Hinweis: „${trainNumber}" sieht nach einer LINIE aus — nutze die ZUGNUMMER (Feld trainNumber aus getDepartures/planJourney/trackTrain).`
+        : ''),
   };
 }

@@ -118,9 +118,14 @@ export async function formation(
       // transiente Fehler: nächstes EVU probieren
     }
   }
+  const looksLikeLine = /[a-z]/i.test(trainNumber.trim());
   return {
     error: 'nicht_gefunden',
-    hint: `Für Zug ${num} am ${operationDate} sind keine Formationsdaten verfügbar (v.a. Fernverkehr teilnehmender Bahnen; max. 3 Tage im Voraus).`,
+    hint:
+      `Für Zug ${num} am ${operationDate} sind keine Formationsdaten verfügbar (v.a. Fernverkehr teilnehmender Bahnen).` +
+      (looksLikeLine
+        ? ` Hinweis: „${trainNumber}" sieht nach einer LINIE aus — nutze die ZUGNUMMER (Feld trainNumber aus getDepartures/planJourney/trackTrain).`
+        : ''),
   };
 }
 

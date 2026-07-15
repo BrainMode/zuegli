@@ -25,7 +25,7 @@ import {
   serviceLine,
   attributeTexts,
   splitTripId,
-  parseZurich,
+  parseTimeInput,
   type Station,
   type OjpTrip,
 } from './format';
@@ -58,8 +58,34 @@ function toError(fn: string, err: unknown) {
     // Fachlich leere Antworten (NO_RESULTS o.ä.) sind kein Ausfall.
     if (err.code === 'ojp_status') return { error: `Keine Daten: ${err.message}` };
     if (err.code === 'keine_daten') return { error: 'keine_daten', hint: err.message };
+    // 400 = die Datenquelle hat UNSERE Anfrage abgelehnt — kein Ausfall,
+    // sondern (fast immer) unbrauchbare Parameter. Ehrlich sagen statt
+    // „API antwortet nicht".
+    if (err.code === 'http' && err.status === 400) {
+      return {
+        error: 'ungueltige_anfrage',
+        hint: 'Die Datenquelle hat die Anfrage abgelehnt — Parameter prüfen (IDs aus searchStations verwenden, Zeiten im ISO-Format).',
+      };
+    }
   }
   return API_ERROR;
+}
+
+/** Klarer Hinweis bei unverständlicher Zeitangabe (statt irreführendem API-Fehler). */
+function timeError(value: string) {
+  return {
+    error: 'zeitformat',
+    hint: `Zeitangabe "${value}" nicht verstanden — bitte ISO-Format (YYYY-MM-DDTHH:mm) oder "HH:mm" verwenden.`,
+  };
+}
+
+/** Normalisiert Betriebstage: "YYYY-MM-DD" oder "DD.MM.YYYY" → "YYYY-MM-DD", sonst null. */
+function normalizeDay(s: string): string | null {
+  const t = s.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const dm = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(t);
+  if (dm) return `${dm[3]}-${dm[2].padStart(2, '0')}-${dm[1].padStart(2, '0')}`;
+  return null;
 }
 
 // ── 1) Bahnhofssuche ────────────────────────────────────────────────────────
@@ -67,12 +93,19 @@ function toError(fn: string, err: unknown) {
 export type StationResult = { stations: Station[] } | { error: string };
 
 /** Sucht Bahnhöfe/Haltestellen nach Name. Liefert IDs für alle anderen Tools. */
-export async function searchStations(query: string): Promise<StationResult> {
+export async function searchStations(query: string): Promise<StationResult | { error: string; hint: string }> {
+  const q = query.trim();
+  if (!q) {
+    return { error: 'leere_suche', hint: 'Bitte einen Bahnhofs- oder Ortsnamen angeben.' };
+  }
+  if (q.length > 120) {
+    return { error: 'zu_lang', hint: 'Suchbegriff ist zu lang — bitte nur den Bahnhofs-/Ortsnamen angeben.' };
+  }
   // Halt-IDs (SLOIDs) ändern sich praktisch nie → 24 h cachen.
-  return cached(`stations:${query.trim().toLowerCase()}`, 86_400, async () => {
+  return cached(`stations:${q.toLowerCase()}`, 86_400, async () => {
     try {
       const delivery = await ojpRequest(
-        locationInformationRequest(query, { results: 6 }),
+        locationInformationRequest(q, { results: 6 }),
         'OJPLocationInformationDelivery',
       );
       const places = arr((delivery as Record<string, unknown>).PlaceResult);
@@ -95,26 +128,31 @@ function normLine(s: string): string {
 async function stopEvents(
   kind: 'departure' | 'arrival',
   stationId: string,
-  opts: BoardOpts,
+  when: Date | undefined,
 ) {
   const delivery = await ojpRequest(
-    stopEventRequest(stationId, {
-      type: kind,
-      when: opts.when ? parseZurich(opts.when) : undefined,
-      results: 14,
-    }),
+    stopEventRequest(stationId, { type: kind, when, results: 14 }),
     'OJPStopEventDelivery',
   );
   const results = arr((delivery as Record<string, any>).StopEventResult);
   return results.map((r) => formatStopEvent((r as Record<string, any>).StopEvent ?? r, kind));
 }
 
+const EMPTY_BOARD_HINT =
+  'Keine Fahrten gefunden — stimmt die stationId (bitte die id aus searchStations verwenden)? Bei Zeitangaben: Liegt der Zeitpunkt evtl. in der Vergangenheit?';
+
 /** Abfahrtstafel eines Bahnhofs. `towards` filtert nach Richtung, `line` nach Linie/Zugnummer. */
 export async function getDepartures(stationId: string, opts: BoardOpts = {}) {
+  let when: Date | undefined;
+  if (opts.when) {
+    const d = parseTimeInput(opts.when);
+    if (!d) return timeError(opts.when);
+    when = d;
+  }
   const key = `dep:${stationId}:${opts.when ?? 'now'}:${opts.towards ?? ''}:${opts.line ?? ''}`;
   return cached(key, 30, async () => {
     try {
-      let entries = await stopEvents('departure', stationId, opts);
+      let entries = await stopEvents('departure', stationId, when);
       if (opts.towards) {
         const needle = opts.towards.toLowerCase();
         const filtered = entries.filter((e) => e.direction?.toLowerCase().includes(needle));
@@ -131,7 +169,11 @@ export async function getDepartures(stationId: string, opts: BoardOpts = {}) {
         const filtered = exact.length > 0 ? exact : partial;
         if (filtered.length > 0) entries = filtered;
       }
-      return { station: stationId, departures: entries.slice(0, 10) };
+      return {
+        station: stationId,
+        departures: entries.slice(0, 10),
+        ...(entries.length === 0 ? { hint: EMPTY_BOARD_HINT } : {}),
+      };
     } catch (err) {
       return toError('getDepartures', err);
     }
@@ -140,16 +182,26 @@ export async function getDepartures(stationId: string, opts: BoardOpts = {}) {
 
 /** Ankunftstafel eines Bahnhofs. */
 export async function getArrivals(stationId: string, opts: BoardOpts = {}) {
+  let when: Date | undefined;
+  if (opts.when) {
+    const d = parseTimeInput(opts.when);
+    if (!d) return timeError(opts.when);
+    when = d;
+  }
   const key = `arr:${stationId}:${opts.when ?? 'now'}:${opts.towards ?? ''}`;
   return cached(key, 30, async () => {
     try {
-      let entries = await stopEvents('arrival', stationId, opts);
+      let entries = await stopEvents('arrival', stationId, when);
       if (opts.towards) {
         const needle = opts.towards.toLowerCase();
         const filtered = entries.filter((e) => e.origin?.toLowerCase().includes(needle));
         if (filtered.length > 0) entries = filtered;
       }
-      return { station: stationId, arrivals: entries.slice(0, 10) };
+      return {
+        station: stationId,
+        arrivals: entries.slice(0, 10),
+        ...(entries.length === 0 ? { hint: EMPTY_BOARD_HINT } : {}),
+      };
     } catch (err) {
       return toError('getArrivals', err);
     }
@@ -171,17 +223,27 @@ function rawTrips(rawXml: string): string[] {
 
 /** Verbindungssuche A→B mit Umstiegen. */
 export async function planJourney(fromId: string, toId: string, opts: JourneyOpts = {}) {
+  if (fromId.trim() === toId.trim()) {
+    return { error: 'gleiche_station', hint: 'Start und Ziel sind derselbe Bahnhof.' };
+  }
+  let departure: Date | undefined;
+  let arrival: Date | undefined;
+  if (opts.departure) {
+    const d = parseTimeInput(opts.departure);
+    if (!d) return timeError(opts.departure);
+    departure = d;
+  } else if (opts.arrival) {
+    const d = parseTimeInput(opts.arrival);
+    if (!d) return timeError(opts.arrival);
+    arrival = d;
+  }
   const key = `journey:${fromId}:${toId}:${opts.departure ?? ''}:${opts.arrival ?? 'now'}`;
   // Konkrete Zeit/Datum → 5 Min cachen; "jetzt" → 45 s.
   const ttl = opts.departure || opts.arrival ? 300 : 45;
   return cached(key, ttl, async () => {
     try {
       const { delivery, raw } = await ojpRequestRaw(
-        tripRequest(fromId, toId, {
-          departure: opts.departure ? parseZurich(opts.departure) : undefined,
-          arrival: opts.arrival && !opts.departure ? parseZurich(opts.arrival) : undefined,
-          results: 3,
-        }),
+        tripRequest(fromId, toId, { departure, arrival, results: 3 }),
         'OJPTripDelivery',
       );
       const results = arr((delivery as Record<string, any>).TripResult);
@@ -201,7 +263,12 @@ export async function planJourney(fromId: string, toId: string, opts: JourneyOpt
           return { ...j, fareRef };
         }),
       );
-      return { journeys };
+      return {
+        journeys,
+        ...(journeys.length === 0
+          ? { hint: 'Keine Verbindung gefunden — stimmen die Bahnhofs-IDs (beide aus searchStations)?' }
+          : {}),
+      };
     } catch (err) {
       return toError('planJourney', err);
     }
@@ -229,6 +296,12 @@ export async function trackTrain(tripId: string) {
       const result = (delivery as Record<string, any>).TripInfoResult ?? {};
       const service = result.Service ?? {};
       const calls = [...arr(result.PreviousCall), ...arr(result.OnwardCall)];
+      if (calls.length === 0) {
+        return {
+          error: 'nicht_gefunden',
+          hint: 'Dieser Zuglauf wurde nicht gefunden — die tripId ist vermutlich abgelaufen oder ungültig. Hole eine frische tripId über getDepartures oder planJourney.',
+        };
+      }
       const { line, trainNumber } = serviceLine(service);
       return {
         line,
@@ -248,11 +321,15 @@ export async function trackTrain(tripId: string) {
 
 /** Findet Bahnhöfe/Haltestellen im Umkreis eines Ortes/einer Adresse. */
 export async function nearbyStations(place: string) {
-  return cached(`nearby:${place.trim().toLowerCase()}`, 86_400, async () => {
+  const p = place.trim();
+  if (!p) {
+    return { error: 'leere_suche', hint: 'Bitte einen Ort oder eine Adresse angeben.' };
+  }
+  return cached(`nearby:${p.toLowerCase()}`, 86_400, async () => {
     try {
       // 1) Ort/Adresse geocoden (LIR ohne stop-Restriktion liefert auch Orte/POIs).
       const geoDelivery = await ojpRequest(
-        locationInformationRequest(place, { restrictToStops: false, results: 1 }),
+        locationInformationRequest(p, { restrictToStops: false, results: 1 }),
         'OJPLocationInformationDelivery',
       );
       const first = arr((geoDelivery as Record<string, any>).PlaceResult)[0];
@@ -281,9 +358,23 @@ function todayZurich(): string {
   return new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Zurich' });
 }
 
+const DAY_MS = 86_400_000;
+
 /** Wagenreihung inkl. Perronsektoren. date = YYYY-MM-DD (Default: heute); stop wählt den Halt für die Sektorangaben. */
 export async function trainFormation(trainNumber: string, date?: string, evu?: string, stop?: string) {
-  const d = date ?? todayZurich();
+  const d = date ? normalizeDay(date) : todayZurich();
+  if (!d) {
+    return { error: 'datum', hint: `Datum "${date}" nicht verstanden — bitte YYYY-MM-DD.` };
+  }
+  // Gültigkeitsfenster der Formationsdaten VOR dem API-Call prüfen (spart Quota).
+  const today = todayZurich();
+  const diffDays = Math.round((new Date(`${d}T12:00Z`).getTime() - new Date(`${today}T12:00Z`).getTime()) / DAY_MS);
+  if (diffDays < 0) {
+    return { error: 'datum', hint: 'Formationsdaten gibt es nicht für vergangene Tage.' };
+  }
+  if (diffDays > 3) {
+    return { error: 'datum', hint: 'Formationsdaten gibt es höchstens 3 Tage im Voraus.' };
+  }
   const key = `formation:${trainNumber}:${d}:${evu ?? 'auto'}:${stop?.trim().toLowerCase() ?? ''}`;
   return cached(key, 120, async () => {
     try {
@@ -298,7 +389,20 @@ export async function trainFormation(trainNumber: string, date?: string, evu?: s
 
 /** Belegungsprognose je Klasse und Abschnitt. date = YYYY-MM-DD (Default: heute). */
 export async function getOccupancy(trainNumber: string, date?: string) {
-  const d = date ?? todayZurich();
+  const d = date ? normalizeDay(date) : todayZurich();
+  if (!d) {
+    return { error: 'datum', hint: `Datum "${date}" nicht verstanden — bitte YYYY-MM-DD.` };
+  }
+  // Der Datenimport lädt nur heute+morgen — für andere Tage ehrlich absagen,
+  // statt fälschlich "Import noch nicht gelaufen" zu melden.
+  const today = todayZurich();
+  const tomorrow = new Date(Date.now() + DAY_MS).toLocaleDateString('sv-SE', { timeZone: 'Europe/Zurich' });
+  if (d !== today && d !== tomorrow) {
+    return {
+      error: 'datum',
+      hint: `Belegungsprognosen gibt es nur für heute (${today}) und morgen (${tomorrow}).`,
+    };
+  }
   return cached(`occupancy:${trainNumber}:${d}`, 300, async () => {
     try {
       return await occupancyForecast(trainNumber, d);

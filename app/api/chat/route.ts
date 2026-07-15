@@ -46,7 +46,7 @@ function cannedMessage(text: string) {
 /** Extrahiert den reinen Text-Inhalt der letzten User-Nachricht. */
 function lastUserText(messages: UIMessage[]): string {
   const last = [...messages].reverse().find((m) => m.role === 'user');
-  if (!last) return '';
+  if (!last || !Array.isArray(last.parts)) return '';
   return last.parts
     .filter((p) => p.type === 'text')
     .map((p) => (p as { text: string }).text)
@@ -105,10 +105,19 @@ export async function POST(req: Request) {
   }
 
   // 4) LLM-Loop mit harten Grenzen
+  // convertToModelMessages wirft bei strukturell kaputten Messages (z.B. ohne
+  // parts, unbekannte role) — das ist eine ungültige Anfrage, kein 500er.
+  let modelMessages;
+  try {
+    modelMessages = await convertToModelMessages(trimmed);
+  } catch {
+    return json({ error: 'invalid', message: 'Ungültige Anfrage.' }, 400);
+  }
+
   const result = streamText({
     model: mistral(MODEL),
     system: systemPrompt(uiLang),
-    messages: await convertToModelMessages(trimmed),
+    messages: modelMessages,
     tools: bahnTools,
     stopWhen: stepCountIs(6),
     temperature: 0.3,
