@@ -3,6 +3,39 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Lang } from '@/lib/i18n';
 import { ToolStatus } from './tool-status';
+import RouteMapLazy from './route-map-lazy';
+import type { RouteStop } from './route-map';
+
+// Extrahiert aus einem Tool-Output die Route für die Inline-Karte.
+// trackTrain: stops[] mit lon/lat; planJourney: Leg-Grenzen der 1. Verbindung.
+function routeFromToolOutput(
+  toolName: string,
+  output: unknown,
+): { stops: RouteStop[]; journeyRef: string | null } | null {
+  if (!output || typeof output !== 'object' || 'error' in (output as object)) return null;
+  const o = output as Record<string, any>;
+  if (toolName === 'trackTrain' && Array.isArray(o.stops)) {
+    const stops: RouteStop[] = o.stops
+      .filter((s: any) => typeof s?.lon === 'number' && typeof s?.lat === 'number')
+      .map((s: any) => ({ name: s.name, lon: s.lon, lat: s.lat, cancelled: s.cancelled }));
+    if (stops.length < 2) return null;
+    return { stops, journeyRef: typeof o.journeyRef === 'string' ? o.journeyRef : null };
+  }
+  if (toolName === 'planJourney' && Array.isArray(o.journeys) && o.journeys[0]?.legs) {
+    const stops: RouteStop[] = [];
+    for (const leg of o.journeys[0].legs as Array<Record<string, any>>) {
+      if (Array.isArray(leg.fromPos)) stops.push({ name: leg.from, lon: leg.fromPos[0], lat: leg.fromPos[1] });
+      if (Array.isArray(leg.toPos)) stops.push({ name: leg.to, lon: leg.toPos[0], lat: leg.toPos[1] });
+    }
+    // Doppelte Umsteige-Punkte (to von Leg n == from von Leg n+1) ausdünnen.
+    const dedup = stops.filter((s, i) => i === 0 || s.name !== stops[i - 1].name);
+    if (dedup.length < 2) return null;
+    const firstTripId = (o.journeys[0].legs as Array<Record<string, any>>).find((l) => l.tripId)?.tripId;
+    const journeyRef = typeof firstTripId === 'string' ? firstTripId.split('~')[0] : null;
+    return { stops: dedup, journeyRef };
+  }
+  return null;
+}
 
 // Markdown-Styling für Assistenten-Antworten (fett, Listen, Links) im DB-Look.
 const MD_COMPONENTS = {
@@ -65,7 +98,16 @@ export function Message({ message, lang }: { message: UIMessage; lang: Lang }) {
           if (part.type.startsWith('tool-')) {
             const toolName = part.type.slice('tool-'.length);
             const state = (part as { state?: string }).state ?? '';
-            return <ToolStatus key={i} toolName={toolName} state={state} lang={lang} />;
+            const route =
+              state === 'output-available'
+                ? routeFromToolOutput(toolName, (part as { output?: unknown }).output)
+                : null;
+            return (
+              <div key={i}>
+                <ToolStatus toolName={toolName} state={state} lang={lang} />
+                {route && <RouteMapLazy stops={route.stops} journeyRef={route.journeyRef} />}
+              </div>
+            );
           }
           return null;
         })}

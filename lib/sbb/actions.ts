@@ -24,6 +24,7 @@ import {
   formatStopEvent,
   formatTrip,
   formatCall,
+  buildPlacesIndex,
   serviceLine,
   attributeTexts,
   splitTripId,
@@ -258,11 +259,12 @@ export async function planJourney(fromId: string, toId: string, opts: JourneyOpt
       );
       const results = arr((delivery as Record<string, any>).TripResult);
       const rawXmlTrips = rawTrips(raw);
+      const places = buildPlacesIndex((delivery as Record<string, any>).TripResponseContext);
 
       const journeys = await Promise.all(
         results.map(async (r, i) => {
           const trip = (r as Record<string, unknown>).Trip as OjpTrip | undefined;
-          const j = formatTrip(trip ?? {});
+          const j = formatTrip(trip ?? {}, places);
           // Eckdaten fürs (Beta-)Fare-Tool 1 h vorhalten → fareRef.
           let fareRef: string | null = null;
           const rawTrip = rawXmlTrips[i];
@@ -314,14 +316,17 @@ export async function trackTrain(tripId: string) {
           hint: 'Dieser Zuglauf wurde nicht gefunden — die tripId ist vermutlich abgelaufen oder ungültig. Hole eine frische tripId über getDepartures oder planJourney.',
         };
       }
+      const places = buildPlacesIndex((delivery as Record<string, any>).TripInfoResponseContext);
       const { line, trainNumber } = serviceLine(service);
       return {
         line,
         trainNumber,
+        // journeyRef: erlaubt der Chat-Karte den Join mit der Live-Position (/api/trains?ref=).
+        journeyRef: parts.journeyRef,
         direction: txt(service.DestinationText) ?? '?',
         cancelled: String(service.Cancelled) === 'true',
         amenities: attributeTexts(service),
-        stops: calls.map((c) => formatCall((c as Record<string, any>).CallAtStop ?? c)),
+        stops: calls.map((c) => formatCall((c as Record<string, any>).CallAtStop ?? c, places)),
       };
     } catch (err) {
       return toError('trackTrain', err);
@@ -485,15 +490,14 @@ async function farePost(body: string): Promise<string> {
   if (res.status === 401 || res.status === 403) {
     throw new OjpError('OJP-Fare-Produkt nicht abonniert', 'fare_abo');
   }
+  const text = await res.text();
+  // Verifiziert: "There was no valid NOVA response." (HTTP 400) = das Beta-
+  // System kann DIESE Verbindung nicht bepreisen (z.B. Nachtverbindungen).
+  if (res.status === 400 && /NOVA response/i.test(text)) {
+    throw new OjpError('NOVA liefert für diese Verbindung keinen Preis', 'kein_preis');
+  }
   if (!res.ok) throw new OjpError(`Fare HTTP ${res.status}`, 'http', res.status);
-  return res.text();
-}
-
-/** sloid → UIC: "ch:1:sloid:218" → "8500218" (Schweizer UIC = 85 + 5-stellig). */
-function sloidToUic(ref: string): string {
-  const m = /^ch:1:sloid:(\d+)/.exec(ref.trim());
-  if (!m) return ref.trim();
-  return `85${m[1].padStart(5, '0')}`;
+  return text;
 }
 
 /** Extrahiert das erste <Trip>-Fragment (prefix-agnostisch) aus einer 1.0-Antwort. */
@@ -519,11 +523,10 @@ export async function getFares(fareRef: string, opts: FareOpts = {}) {
           hint: 'Diese Verbindung ist nicht mehr im Zwischenspeicher — bitte planJourney erneut aufrufen und die neue fareRef nutzen.',
         };
       }
-      // Schritt 1: Trip im 1.0-Format vom Fare-Service selbst berechnen lassen.
+      // Schritt 1: Trip im 1.0-Format vom Fare-Service selbst berechnen lassen
+      // (sloid-Refs direkt — UIC-Nummern findet der Beta-Router nicht).
       const dep = new Date(meta.dep);
-      const tripXmlRaw = await farePost(
-        fareTripRequestEnvelope(sloidToUic(meta.fromId), sloidToUic(meta.toId), dep),
-      );
+      const tripXmlRaw = await farePost(fareTripRequestEnvelope(meta.fromId, meta.toId, dep));
       const tripInner = firstRawTrip(tripXmlRaw);
       if (!tripInner) {
         return {
@@ -559,6 +562,12 @@ export async function getFares(fareRef: string, opts: FareOpts = {}) {
       };
     } catch (err) {
       if (err instanceof OjpError && err.code === 'fare_abo') return FARE_NOT_SUBSCRIBED;
+      if (err instanceof OjpError && err.code === 'kein_preis') {
+        return {
+          error: 'kein_preis',
+          hint: 'Der (Beta-)Preisdienst kann diese Verbindung nicht bepreisen (z.B. Nacht-/Randverbindungen) — Preise auf sbb.ch.',
+        };
+      }
       return toError('getFares', err);
     }
   });

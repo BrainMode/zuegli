@@ -139,8 +139,12 @@ export function tripInfoRequest(journeyRef: string, operatingDayRef: string): st
 // OJPFareRequest eingebettet. So bleiben die Formate konsistent (2.0-Trips vom
 // ojp20-Endpoint wären im 1.0-Schema ungültig).
 
-/** Schritt 1: 1.0-TripRequest an den Fare-Endpoint (UIC-Nummern, z.B. 8505000). */
-export function fareTripRequestEnvelope(fromUic: string, toUic: string, departure: Date): string {
+/**
+ * Schritt 1: 1.0-TripRequest an den Fare-Endpoint. VERIFIZIERT: sloid-Refs
+ * (ch:1:sloid:5000) funktionieren, UIC-Nummern NICHT (TRIP_NOTRIPFOUND);
+ * LocationName ist Pflicht (HTTP 400 ohne); Zeit als ISO mit Z.
+ */
+export function fareTripRequestEnvelope(fromRef: string, toRef: string, departure: Date): string {
   const now = stamp();
   return `<?xml version="1.0" encoding="UTF-8"?>
 <OJP xmlns="http://www.siri.org.uk/siri" xmlns:ojp="http://www.vdv.de/ojp" version="1.0">
@@ -152,14 +156,14 @@ export function fareTripRequestEnvelope(fromUic: string, toUic: string, departur
         <RequestTimestamp>${now}</RequestTimestamp>
         <ojp:Origin>
           <ojp:PlaceRef>
-            <StopPointRef>${xmlEscape(fromUic)}</StopPointRef>
+            <StopPointRef>${xmlEscape(fromRef)}</StopPointRef>
             <ojp:LocationName><ojp:Text>-</ojp:Text></ojp:LocationName>
           </ojp:PlaceRef>
           <ojp:DepArrTime>${departure.toISOString()}</ojp:DepArrTime>
         </ojp:Origin>
         <ojp:Destination>
           <ojp:PlaceRef>
-            <StopPointRef>${xmlEscape(toUic)}</StopPointRef>
+            <StopPointRef>${xmlEscape(toRef)}</StopPointRef>
             <ojp:LocationName><ojp:Text>-</ojp:Text></ojp:LocationName>
           </ojp:PlaceRef>
         </ojp:Destination>
@@ -175,7 +179,13 @@ export function fareTripRequestEnvelope(fromUic: string, toUic: string, departur
 
 export type FareOpts = { travelClass?: 'first' | 'second'; halbtax?: boolean };
 
-/** Schritt 2: FareRequest mit dem (1.0-)Trip aus Schritt 1. */
+/**
+ * Schritt 2: FareRequest mit dem (1.0-)Trip aus Schritt 1.
+ * WICHTIG (verifiziert): Der zurückgegebene Trip enthält siri:-prefixte
+ * Elemente → xmlns:siri MUSS am Root deklariert sein, sonst antwortet der
+ * Server mit einem nackten 500. Die Voll-Params (FareAuthorityFilter +
+ * PassengerCategory + TravelClass + Traveller) sind Pflicht.
+ */
 export function fareRequestEnvelope(tripInnerXml: string, opts: FareOpts = {}): string {
   const now = stamp();
   const travelClass = opts.travelClass ?? 'second';
@@ -190,7 +200,7 @@ export function fareRequestEnvelope(tripInnerXml: string, opts: FareOpts = {}): 
             </ojp:EntitlementProducts>`
     : '';
   return `<?xml version="1.0" encoding="UTF-8"?>
-<OJP xmlns="http://www.siri.org.uk/siri" xmlns:ojp="http://www.vdv.de/ojp" version="1.0">
+<OJP xmlns="http://www.siri.org.uk/siri" xmlns:siri="http://www.siri.org.uk/siri" xmlns:ojp="http://www.vdv.de/ojp" version="1.0">
   <OJPRequest>
     <ServiceRequest>
       <RequestTimestamp>${now}</RequestTimestamp>
@@ -205,7 +215,7 @@ export function fareRequestEnvelope(tripInnerXml: string, opts: FareOpts = {}): 
           <ojp:PassengerCategory>Adult</ojp:PassengerCategory>
           <ojp:TravelClass>${travelClass}</ojp:TravelClass>
           <ojp:Traveller>
-            <ojp:Age>30</ojp:Age>
+            <ojp:Age>25</ojp:Age>
             <ojp:PassengerCategory>Adult</ojp:PassengerCategory>${entitlement}
           </ojp:Traveller>
         </ojp:Params>

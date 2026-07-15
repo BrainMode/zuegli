@@ -121,7 +121,7 @@ export const bahnTools = {
 
   getDisruptions: tool({
     description:
-      'Aktuelle Störungen im Schweizer ÖV (landesweiter Feed, wird ca. alle 30 Minuten aktualisiert): Unterbrüche, Ausfälle, Ersatzverkehr, Grund und Dauer. Für Fragen wie „Gibt es Störungen am Gotthard?", „Warum steht mein Zug?", „Fährt die Strecke X wieder?". Optional mit filter (Bahnhof, Strecke, Linie oder Stichwort) eingrenzen.',
+      'Aktuelle Störungen im Schweizer ÖV (ungeplante Ereignisse ca. alle 2 Minuten aktualisiert, geplante täglich): Unterbrüche, Ausfälle, Ersatzverkehr, Grund und Dauer. Für Fragen wie „Gibt es Störungen am Gotthard?", „Warum steht mein Zug?", „Fährt die Strecke X wieder?". Optional mit filter (Bahnhof, Strecke, Linie oder Stichwort) eingrenzen.',
     inputSchema: z.object({
       filter: z
         .string()

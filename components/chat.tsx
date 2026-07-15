@@ -48,6 +48,12 @@ export function Chat({ imprintUrl }: { imprintUrl?: string | null }) {
             <h1 className="truncate text-[17px] font-bold text-white">Zügli</h1>
             <p className="truncate text-xs text-white/85">{s.tagline}</p>
           </div>
+          <a
+            href="/karte"
+            className="shrink-0 rounded-md border border-white/40 px-2.5 py-1.5 text-sm font-semibold text-white hover:bg-white/10"
+          >
+            🗺️ {s.map}
+          </a>
           <span className="hidden shrink-0 rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-semibold text-white sm:inline">
             🌍 {s.langBadge}
           </span>

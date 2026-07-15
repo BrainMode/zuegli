@@ -19,10 +19,15 @@ import { ojpParser, arr, txt, OjpError } from './client';
 
 const SIRI_SX_URL =
   process.env.OTD_SIRI_SX_URL ?? 'https://api.opentransportdata.swiss/la/siri-sx';
+const SSXU_URL =
+  process.env.OTD_SSXU_URL ?? 'https://api.opentransportdata.swiss/la/siri-sx-unplanned';
 
-const DAILY_FETCH_CAP = 44; // Puffer unter dem 48/Tag-Limit des Abos
+const DAILY_FETCH_CAP = 44; // Puffer unter dem 48/Tag-Limit des Voll-Feed-Abos
+const SSXU_DAILY_CAP = 2500; // Puffer unter 3000/Tag des Unplanned-Abos
 const BLOB_KEY = 'sirisx:blob';
 const STALE_KEY = 'sirisx:stale';
+const SSXU_BLOB_KEY = 'sirisxu:blob';
+const SSXU_STALE_KEY = 'sirisxu:stale';
 
 const hasUpstash = Boolean(
   process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
@@ -42,24 +47,23 @@ export type Situation = {
 
 // ── Cron-Seite: Feed laden, kompaktieren, Blob schreiben ────────────────────
 
-/** Harter Tageszähler NUR für den SIRI-SX-Feed. true = Fetch erlaubt. */
-async function underDailyCap(): Promise<boolean> {
+/** Harter Tageszähler je Feed. true = Fetch erlaubt. */
+async function underDailyCap(counter: string, cap: number): Promise<boolean> {
   if (!redis) return true; // lokal/Fork ohne Redis: Cron-Kadenz allein schützt
   try {
-    const key = `zuegli:sirisx:fetches:${new Date().toISOString().slice(0, 10)}`;
+    const key = `zuegli:${counter}:fetches:${new Date().toISOString().slice(0, 10)}`;
     const used = await redis.incr(key);
     if (used === 1) await redis.expire(key, 90_000);
-    return used <= DAILY_FETCH_CAP;
+    return used <= cap;
   } catch {
     return true;
   }
 }
 
-/** Holt den Feed (folgt dem Redirect auf die signierte URL) und entpackt gzip. */
-async function fetchFeedXml(): Promise<string> {
-  const key = process.env.OTD_SIRI_SX_KEY ?? process.env.OTD_API_KEY;
-  if (!key) throw new OjpError('OTD_SIRI_SX_KEY fehlt', 'nicht_konfiguriert');
-  const res = await fetch(SIRI_SX_URL, {
+/** Holt einen SIRI-Feed (folgt Redirects auf signierte URLs) und entpackt gzip. */
+async function fetchFeedXml(url: string, key: string | undefined): Promise<string> {
+  if (!key) throw new OjpError('SIRI-SX-Key fehlt', 'nicht_konfiguriert');
+  const res = await fetch(url, {
     headers: {
       Authorization: `Bearer ${key}`,
       'User-Agent': 'zuegli (open-source; github.com/BrainMode/zuegli)',
@@ -70,7 +74,7 @@ async function fetchFeedXml(): Promise<string> {
   });
   if (!res.ok) throw new OjpError(`SIRI-SX HTTP ${res.status}`, 'http', res.status);
   const bytes = new Uint8Array(await res.arrayBuffer());
-  // Feed kommt als gzip-DATEI (ohne Content-Encoding) → Magic-Bytes prüfen.
+  // Feed kommt ggf. als gzip-DATEI (ohne Content-Encoding) → Magic-Bytes prüfen.
   const xmlBytes = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes;
   return strFromU8(xmlBytes);
 }
@@ -147,20 +151,39 @@ function compactFeed(xml: string): Situation[] {
 }
 
 /**
- * Lädt den SIRI-SX-Feed und schreibt die kompakte Lage als Blob in den Cache.
- * Wird vom 30-Min-Cron aufgerufen — NICHT im Request-Pfad verwenden.
+ * Lädt den SIRI-SX-VOLL-Feed (geplante + ungeplante Situationen, ~106 MB XML,
+ * Abo-Limit 48/Tag) und schreibt die kompakte Lage als Blob. Läuft nur noch
+ * 1×/Tag — die Frische kommt vom Unplanned-Feed (refreshUnplanned).
  */
 export async function refreshDisruptions(): Promise<{ situations: number; blobKB: number }> {
-  if (!(await underDailyCap())) {
+  if (!(await underDailyCap('sirisx', DAILY_FETCH_CAP))) {
     throw new OjpError('SIRI-SX-Tageskontingent (48/Tag) erschöpft — Fetch übersprungen', 'quota');
   }
-  const xml = await fetchFeedXml();
+  const xml = await fetchFeedXml(SIRI_SX_URL, process.env.OTD_SIRI_SX_KEY ?? process.env.OTD_API_KEY);
   const situations = compactFeed(xml);
   const blob = Buffer.from(gzipSync(strToU8(JSON.stringify(situations)), { level: 6 })).toString(
     'base64',
   );
-  await cachePut(BLOB_KEY, 40 * 60, blob); // 40 min: überlebt einen verpassten Cron-Slot
-  await cachePut(STALE_KEY, 86_400, blob); // 24-h-Fallback
+  await cachePut(BLOB_KEY, 26 * 3600, blob); // 26 h: überlebt einen verpassten Tages-Cron
+  await cachePut(STALE_KEY, 48 * 3600, blob);
+  return { situations: situations.length, blobKB: Math.round(blob.length / 1024) };
+}
+
+/**
+ * Lädt den kleinen UNPLANNED-Feed (~0.5 MB, Abo 3000/Tag, 2/min) — läuft alle
+ * 2 Minuten und macht die Akut-Störungslage fast live.
+ */
+export async function refreshUnplanned(): Promise<{ situations: number; blobKB: number }> {
+  if (!(await underDailyCap('sirisxu', SSXU_DAILY_CAP))) {
+    throw new OjpError('SSXU-Tageskontingent erschöpft — Fetch übersprungen', 'quota');
+  }
+  const xml = await fetchFeedXml(SSXU_URL, process.env.OTD_SSXU_KEY ?? process.env.OTD_API_KEY);
+  const situations = compactFeed(xml);
+  const blob = Buffer.from(gzipSync(strToU8(JSON.stringify(situations)), { level: 6 })).toString(
+    'base64',
+  );
+  await cachePut(SSXU_BLOB_KEY, 10 * 60, blob);
+  await cachePut(SSXU_STALE_KEY, 6 * 3600, blob);
   return { situations: situations.length, blobKB: Math.round(blob.length / 1024) };
 }
 
@@ -173,20 +196,27 @@ function decodeBlob(blob: string): Situation[] {
 }
 
 /**
- * Aktuelle Störungslage aus dem Blob-Cache (In-Memory 5 Min pro Instanz).
- * Wirft OjpError('keine_daten'), wenn der Cron noch nie gelaufen ist.
+ * Aktuelle Störungslage: geplante Situationen aus dem täglichen Voll-Feed,
+ * gemergt mit dem 2-Minuten-Unplanned-Feed (gewinnt bei gleicher
+ * SituationNumber). In-Memory 90 s pro Instanz.
+ * Wirft OjpError('keine_daten'), wenn noch kein Import gelaufen ist.
  */
 export async function fetchAllSituations(): Promise<Situation[]> {
   if (memSituations && memSituations.exp > Date.now()) return memSituations.data;
 
-  const blob = (await cacheGet<string>(BLOB_KEY)) ?? (await cacheGet<string>(STALE_KEY));
-  if (!blob) {
+  const fullBlob = (await cacheGet<string>(BLOB_KEY)) ?? (await cacheGet<string>(STALE_KEY));
+  const unplannedBlob =
+    (await cacheGet<string>(SSXU_BLOB_KEY)) ?? (await cacheGet<string>(SSXU_STALE_KEY));
+  if (!fullBlob && !unplannedBlob) {
     throw new OjpError(
-      'Die Störungslage ist noch nicht importiert (der 30-Min-Datenimport ist noch nicht gelaufen oder Redis fehlt).',
+      'Die Störungslage ist noch nicht importiert (Datenimport noch nicht gelaufen oder Redis fehlt).',
       'keine_daten',
     );
   }
-  const data = decodeBlob(blob);
-  memSituations = { exp: Date.now() + 5 * 60_000, data };
+  const merged = new Map<string, Situation>();
+  if (fullBlob) for (const s of decodeBlob(fullBlob)) merged.set(s.id || s.summary, s);
+  if (unplannedBlob) for (const s of decodeBlob(unplannedBlob)) merged.set(s.id || s.summary, s);
+  const data = [...merged.values()];
+  memSituations = { exp: Date.now() + 90_000, data };
   return data;
 }

@@ -18,6 +18,7 @@ type Strings = {
   tagline: string;
   disclaimer: string;
   langBadge: string;
+  map: string;
   emptyHint: string;
   examplesLabel: string;
   examples: string[];
@@ -51,6 +52,7 @@ export const STRINGS: Record<Lang, Strings> = {
     tagline: 'Deine KI-Bahnauskunft für die Schweiz',
     disclaimer: 'Inoffiziell · keine Verbindung zu SBB CFF FFS',
     langBadge: '100+ Sprachen',
+    map: 'Karte',
     emptyHint:
       'Frag mich in normaler Sprache nach Abfahrten, Verspätungen, Gleisen, Verbindungen, der Wagenreihung oder wie voll dein Zug wird.',
     examplesLabel: 'Probier eine Frage',
@@ -91,6 +93,7 @@ export const STRINGS: Record<Lang, Strings> = {
     tagline: 'Ton assistant ferroviaire IA pour la Suisse',
     disclaimer: 'Non officiel · sans lien avec les CFF (SBB CFF FFS)',
     langBadge: '100+ langues',
+    map: 'Carte',
     emptyHint:
       'Pose tes questions en langage naturel : départs, retards, voies, correspondances, composition des trains ou taux d’occupation.',
     examplesLabel: 'Essaie une question',
@@ -135,6 +138,7 @@ export const STRINGS: Record<Lang, Strings> = {
     tagline: 'Il tuo assistente ferroviario IA per la Svizzera',
     disclaimer: 'Non ufficiale · nessun legame con le FFS (SBB CFF FFS)',
     langBadge: '100+ lingue',
+    map: 'Mappa',
     emptyHint:
       'Chiedimi in linguaggio naturale di partenze, ritardi, binari, coincidenze, composizione dei treni o quanto sarà pieno il tuo treno.',
     examplesLabel: 'Prova una domanda',
@@ -179,6 +183,7 @@ export const STRINGS: Record<Lang, Strings> = {
     tagline: 'Your AI train assistant for Switzerland',
     disclaimer: 'Unofficial · not affiliated with SBB CFF FFS',
     langBadge: '100+ languages',
+    map: 'Map',
     emptyHint:
       'Ask me in plain language about departures, delays, platforms, connections, train composition or how full your train will be.',
     examplesLabel: 'Try a question',
@@ -223,6 +228,7 @@ export const STRINGS: Record<Lang, Strings> = {
     tagline: 'Tu asistente ferroviario con IA para Suiza',
     disclaimer: 'No oficial · sin relación con SBB CFF FFS',
     langBadge: '100+ idiomas',
+    map: 'Mapa',
     emptyHint:
       'Pregúntame en lenguaje normal por salidas, retrasos, vías, conexiones, composición del tren o lo lleno que irá tu tren.',
     examplesLabel: 'Prueba una pregunta',
@@ -265,6 +271,7 @@ export const STRINGS: Record<Lang, Strings> = {
     tagline: 'İsviçre için yapay zekâ tren asistanın',
     disclaimer: 'Resmi değildir · SBB CFF FFS ile bağlantısı yoktur',
     langBadge: '100+ dil',
+    map: 'Harita',
     emptyHint:
       'Kalkışlar, gecikmeler, peronlar, bağlantılar, vagon dizilişi veya trenin ne kadar dolu olacağı hakkında normal dille sor.',
     examplesLabel: 'Bir soru dene',

@@ -238,6 +238,8 @@ export type JourneyLeg = {
   trainNumber: string | null;
   direction: string;
   from: string;
+  fromPos?: [number, number]; // [lon, lat] für die Chat-Karte
+  toPos?: [number, number];
   fromPlatform: string | null;
   dep: string | null;
   depReal: string | null;
@@ -252,7 +254,7 @@ export type JourneyLeg = {
   amenities: string[];
 };
 
-export function formatTrip(trip: OjpTrip): {
+export function formatTrip(trip: OjpTrip, places?: PlacesIndex): {
   departure: string | null;
   departureReal: string | null;
   departureDelayMin: number | null;
@@ -276,16 +278,20 @@ export function formatTrip(trip: OjpTrip): {
     const arrT = txt(alight.ServiceArrival?.TimetabledTime);
     const arrE = txt(alight.ServiceArrival?.EstimatedTime);
     const { line, trainNumber } = serviceLine(service);
+    const fromPos = lookupPlace(places, txt((board as Record<string, any>).StopPointRef));
+    const toPos = lookupPlace(places, txt((alight as Record<string, any>).StopPointRef));
     return {
       line,
       trainNumber,
       direction: txt(service.DestinationText) ?? '?',
       from: txt(board.StopPointName) ?? '?',
+      ...(fromPos ? { fromPos } : {}),
       fromPlatform: txt(board.EstimatedQuay) ?? txt(board.PlannedQuay) ?? null,
       dep: hhmm(depT),
       depReal: depE ? hhmm(depE) : null,
       depDelayMin: delayMinFromTimes(depT, depE),
       to: txt(alight.StopPointName) ?? '?',
+      ...(toPos ? { toPos } : {}),
       toPlatform: txt(alight.EstimatedQuay) ?? txt(alight.PlannedQuay) ?? null,
       arr: hhmm(arrT),
       arrReal: arrE ? hhmm(arrE) : null,
@@ -320,9 +326,50 @@ export function isoDurationMin(d: string | null): number | null {
   return Math.round(seconds / 60);
 }
 
+// ── Orts-Index aus dem ResponseContext (Koordinaten für die Chat-Karten) ────
+
+export type PlacesIndex = Record<string, [number, number]>; // Ref → [lon, lat]
+
+function round5(n: number): number {
+  return Math.round(n * 1e5) / 1e5;
+}
+
+/**
+ * Baut Ref→[lon,lat] aus TripInfoResponseContext/TripResponseContext.Places.
+ * Indexiert sowohl die exakten Refs (StopPlaceRef/StopPointRef, auch mit
+ * Gleis-Suffix ch:1:sloid:N:x:y) als auch den sloid-Basisteil.
+ */
+export function buildPlacesIndex(context: unknown): PlacesIndex {
+  const index: PlacesIndex = {};
+  const places = arr((context as Record<string, any>)?.Places?.Place);
+  for (const p of places) {
+    const place = p as Record<string, any>;
+    const geo = place.GeoPosition;
+    const lon = geo ? Number(txt(geo.Longitude)) : NaN;
+    const lat = geo ? Number(txt(geo.Latitude)) : NaN;
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+    const pos: [number, number] = [round5(lon), round5(lat)];
+    for (const ref of [
+      txt(place.StopPlace?.StopPlaceRef),
+      txt(place.StopPoint?.StopPointRef),
+    ]) {
+      if (!ref) continue;
+      index[ref] = pos;
+      const base = /^(ch:1:sloid:\d+)/.exec(ref)?.[1];
+      if (base && !index[base]) index[base] = pos;
+    }
+  }
+  return index;
+}
+
+function lookupPlace(index: PlacesIndex | undefined, ref: string | null): [number, number] | null {
+  if (!index || !ref) return null;
+  return index[ref] ?? index[/^(ch:1:sloid:\d+)/.exec(ref)?.[1] ?? ''] ?? null;
+}
+
 // ── TripInfo (Zuglauf) ──────────────────────────────────────────────────────
 
-export function formatCall(call: OjpCallAtStop): {
+export function formatCall(call: OjpCallAtStop, places?: PlacesIndex): {
   name: string;
   arr: string | null;
   arrDelayMin: number | null;
@@ -330,11 +377,14 @@ export function formatCall(call: OjpCallAtStop): {
   depDelayMin: number | null;
   platform: string | null;
   cancelled: boolean;
+  lon?: number;
+  lat?: number;
 } {
   const arrT = txt(call.ServiceArrival?.TimetabledTime);
   const arrE = txt(call.ServiceArrival?.EstimatedTime);
   const depT = txt(call.ServiceDeparture?.TimetabledTime);
   const depE = txt(call.ServiceDeparture?.EstimatedTime);
+  const pos = lookupPlace(places, txt((call as Record<string, any>).StopPointRef));
   return {
     name: txt(call.StopPointName) ?? '?',
     arr: hhmm(arrE ?? arrT),
@@ -343,5 +393,6 @@ export function formatCall(call: OjpCallAtStop): {
     depDelayMin: delayMinFromTimes(depT, depE),
     platform: txt(call.EstimatedQuay) ?? txt(call.PlannedQuay) ?? null,
     cancelled: String(call.NotServicedStop) === 'true',
+    ...(pos ? { lon: pos[0], lat: pos[1] } : {}),
   };
 }
