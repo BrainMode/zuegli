@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+
+# env — Keys NIEMALS commiten (.env.example ist die Vorlage)
+.env
+.env.*
+!.env.example
+
+# vercel
+.vercel/
+
+# misc
+*.log
+.DS_Store
+*.tsbuildinfo
+
+.vercel
+.env*
+
+# Upstash/agent-skill Artefakte (nicht Teil der App)
+.agents/
+.claude/
+skills-lock.json
+
+# Private Notizen / Entwürfe — NICHT ins öffentliche Repo
+_private/
