@@ -1,13 +1,14 @@
 // Train Formation Service v2 (Wagenreihung) — DAS Schweiz-Feature, das die DB
 // öffentlich nicht hat: Wagenreihenfolge inkl. PERRONSEKTOR pro Wagen und Halt,
-// Klasse, Rollstuhlplätze, Velohaken, Speisewagen …
+// Klasse, Sitzplätze, Rollstuhlplätze, Velohaken, Speisewagen …
 //
 // GET https://api.opentransportdata.swiss/formation/v2/formations_full
 //     ?evu=SBBP&operationDate=YYYY-MM-DD&trainNumber=NNN   (Bearer-Auth)
 //
-// HINWEIS: Feld-Enumerationen (amenities/class) nach Erhalt echter Keys im
-// Smoke-Test verifizieren; der Code ist defensiv (Optional Chaining, tolerante
-// Feldzugriffe) — Muster wie official.ts der DB-Schwester-App.
+// Response-Schema GEGEN ECHTE DATEN VERIFIZIERT (2026-07-15, IC 712) — weicht
+// vom Cookbook ab: formationsAtScheduledStops[] (Halt + Gleis + CUS-String),
+// formations[].formationVehicles[] mit number/position/vehicleProperties und
+// je Halt `sectors` in formationVehicleAtScheduledStops[].
 
 import { otdGet, OjpError } from './client';
 
@@ -16,9 +17,6 @@ const FORMATION_BASE =
 
 // EVUs mit Formationsdaten; SBBP zuerst, dann die wahrscheinlichsten anderen.
 const EVU_FALLBACKS = ['SBBP', 'THURBO', 'BLSP', 'SOB'] as const;
-export const EVU_LIST = [
-  'SBBP', 'BLSP', 'THURBO', 'SOB', 'RhB', 'ZB', 'MBC', 'OeBB', 'TPF', 'TRN', 'VDBB',
-] as const;
 
 type Json = Record<string, any>;
 
@@ -32,52 +30,65 @@ async function fetchFormation(evu: string, operationDate: string, trainNumber: s
   return (await res.json()) as Json;
 }
 
-/** Wagen-Ausstattungscodes → deutsche Labels (defensiv; unbekannte Codes roh durchreichen). */
-const AMENITY_LABELS: Record<string, string> = {
-  BHP: 'Rollstuhlplätze',
-  NF: 'Niederflureinstieg',
-  VH: 'Velohaken',
-  VR: 'Veloplätze (Reservierung)',
-  WR: 'Speisewagen',
-  BZ: 'Businesszone',
-  FZ: 'Familienzone',
-  FA: 'Familienwagen',
-  KW: 'Stillabteil',
-  CC: 'Couchettes',
-  WL: 'Schlafwagen',
+type Car = {
+  wagen: number | null;
+  position: number | null;
+  klasse: '1.' | '2.' | '1./2.' | null;
+  sektor: string | null;
+  ausstattung: string[];
 };
-
-function amenityLabel(code: unknown): string {
-  const c = String(code ?? '').trim();
-  return AMENITY_LABELS[c] ?? c;
-}
 
 export type FormationResult =
   | {
       evu: string;
-      train: string;
-      cars: Array<{
-        position: number | null;
-        type: string | null;
-        class: string | null;
-        amenities: string[];
-      }>;
-      stops: Array<{
-        name: string;
-        track: string | null;
-        sectors: string | null;
-      }>;
+      trainNumber: string;
+      date: string;
+      sektorenAmHalt: { name: string; gleis: string | null } | null;
+      hinweis?: string;
+      wagen: Car[];
+      alleHalte: string[];
     }
   | { error: string; hint?: string };
 
+function asArray(x: unknown): Json[] {
+  return Array.isArray(x) ? x : [];
+}
+
+/** Ausstattung eines Wagens aus den (verifizierten) vehicleProperties ableiten. */
+function carAmenities(p: Json): string[] {
+  const out: string[] = [];
+  if (Number(p.numberRestaurantSpace) > 0) out.push('Speisewagen');
+  if (Number(p.numberBikeHooks) > 0) out.push(`Velohaken (${p.numberBikeHooks})`);
+  const acc: Json = p.accessibilityProperties ?? {};
+  if (Number(acc.numberWheelchairSpaces) > 0) out.push('Rollstuhlplätze');
+  if (acc.wheelchairToilet === true) out.push('Rollstuhl-WC');
+  const picto: Json = p.pictoProperties ?? {};
+  if (picto.familyZonePicto === true) out.push('Familienzone');
+  if (picto.businessZonePicto === true) out.push('Businesszone');
+  if (picto.strollerPicto === true) out.push('Kinderwagenplatz');
+  if (Number(p.numberBeds) > 0) out.push('Schlafwagen');
+  return out;
+}
+
+function carClass(p: Json): Car['klasse'] {
+  const first = Number(p.number1class) > 0;
+  const second = Number(p.number2class) > 0;
+  if (first && second) return '1./2.';
+  if (first) return '1.';
+  if (second) return '2.';
+  return null; // Lok/Dienstwagen
+}
+
 /**
- * Wagenreihung eines Zuges. Probiert ohne EVU-Angabe die üblichen EVUs durch
- * (SBB zuerst) — jede Probe ist ein Request, deshalb kurze Fallback-Liste.
+ * Wagenreihung eines Zuges. `stop` (Name-Substring) wählt den Halt, für den
+ * die Sektoren gelten sollen — Default ist der erste Halt des Laufs.
+ * Probiert ohne EVU-Angabe die üblichen EVUs durch (SBB zuerst).
  */
 export async function formation(
   trainNumber: string,
   operationDate: string,
   evu?: string,
+  stop?: string,
 ): Promise<FormationResult> {
   if (!key()) {
     return {
@@ -86,61 +97,84 @@ export async function formation(
         'Die Wagenreihung ist noch nicht aktiviert — dafür fehlt der (kostenlose) API-Key von opentransportdata.swiss.',
     };
   }
-  const num = trainNumber.replace(/\D/g, '');
+  const num = trainNumber.replace(/\D/g, '').replace(/^0+/, '');
   if (!num) {
     return { error: 'zugnummer', hint: `„${trainNumber}" enthält keine Zugnummer (nur Ziffern).` };
   }
 
   const evus = evu ? [evu] : [...EVU_FALLBACKS];
-  let lastErr: unknown = null;
   for (const e of evus) {
     try {
       const data = await fetchFormation(e, operationDate, num);
-      const parsed = parseFormation(e, num, data);
+      const parsed = parseFormation(e, num, operationDate, data, stop);
       if (parsed) return parsed;
     } catch (err) {
-      lastErr = err;
-      // 404/leer → nächstes EVU probieren; harte Fehler durchreichen.
-      if (err instanceof OjpError && err.status != null && err.status !== 404 && err.status < 500) {
-        break;
+      if (err instanceof OjpError) {
+        if (err.code === 'quota' || err.code === 'nicht_konfiguriert') throw err;
+        // 400 "There were no formation data." / 404 → nächstes EVU probieren.
+        if (err.status === 400 || err.status === 404) continue;
+        if (err.status === 401 || err.status === 403) throw err;
       }
+      // transiente Fehler: nächstes EVU probieren
     }
   }
-  if (lastErr instanceof OjpError && lastErr.code === 'quota') throw lastErr;
   return {
     error: 'nicht_gefunden',
-    hint: `Für Zug ${num} am ${operationDate} sind keine Formationsdaten verfügbar (nur teilnehmende Bahnen, max. 3 Tage im Voraus).`,
+    hint: `Für Zug ${num} am ${operationDate} sind keine Formationsdaten verfügbar (v.a. Fernverkehr teilnehmender Bahnen; max. 3 Tage im Voraus).`,
   };
 }
 
-function parseFormation(evu: string, trainNumber: string, data: Json): FormationResult | null {
-  const stops = asArray(data.scheduledStops);
-  const vehicles = asArray(data.formationVehicles ?? data.vehicles);
+function parseFormation(
+  evu: string,
+  trainNumber: string,
+  date: string,
+  data: Json,
+  stopFilter?: string,
+): FormationResult | null {
+  const stops = asArray(data.formationsAtScheduledStops);
+  const formations = asArray(data.formations);
+  const vehicles = asArray(formations[0]?.formationVehicles);
   if (stops.length === 0 && vehicles.length === 0) return null;
+
+  const stopNames: string[] = stops.map((s) => String(s.scheduledStop?.stopPoint?.name ?? '?'));
+
+  // Halt wählen: Filter-Substring oder erster Halt.
+  let stopIdx = 0;
+  if (stopFilter) {
+    const needle = stopFilter.trim().toLowerCase();
+    const i = stopNames.findIndex((n) => n.toLowerCase().includes(needle));
+    if (i >= 0) stopIdx = i;
+  }
+  const chosenStop = stops[stopIdx]?.scheduledStop;
+  const chosenName = stopNames[stopIdx] ?? null;
+
+  const cars: Car[] = vehicles.slice(0, 24).map((v: Json) => {
+    const p: Json = v.vehicleProperties ?? {};
+    const atStops = asArray(v.formationVehicleAtScheduledStops);
+    // Sektor am gewählten Halt (Reihenfolge entspricht den Halten des Laufs).
+    const atChosen =
+      atStops[stopIdx] ??
+      atStops.find((a: Json) => String(a.stopPoint?.name ?? '') === chosenName);
+    return {
+      wagen: v.number != null ? Number(v.number) : null,
+      position: v.position != null ? Number(v.position) : null,
+      klasse: carClass(p),
+      sektor: atChosen?.sectors != null ? String(atChosen.sectors) : null,
+      ausstattung: carAmenities(p),
+    };
+  });
 
   return {
     evu,
-    train: [data.trainMetaInformation?.trainType, data.trainMetaInformation?.lineText ?? trainNumber]
-      .filter(Boolean)
-      .join(' ') || trainNumber,
-    cars: vehicles.slice(0, 20).map((v: Json) => {
-      const p = v.vehicleProperties ?? v;
-      return {
-        position: p.orderNumber != null ? Number(p.orderNumber) : null,
-        type: p.vehicleTypeKI ?? p.type ?? null,
-        class: p.class != null ? String(p.class) : null,
-        amenities: asArray(p.amenities).map(amenityLabel),
-      };
-    }),
-    stops: stops.slice(0, 12).map((s: Json) => ({
-      name: s.stopPoint?.name ?? '?',
-      track: s.track?.text ?? null,
-      // Kompakter CUS-String: Sektorlage der Wagen an diesem Halt.
-      sectors: s.formationShortString ?? null,
-    })),
+    trainNumber,
+    date,
+    sektorenAmHalt: chosenName
+      ? { name: chosenName, gleis: chosenStop?.track != null ? String(chosenStop.track) : null }
+      : null,
+    ...(formations.length > 1
+      ? { hinweis: 'Die Formation ändert sich unterwegs (z.B. Flügelzug/Stärkung) — Sektorangaben gelten für den genannten Halt.' }
+      : {}),
+    wagen: cars,
+    alleHalte: stopNames.slice(0, 20),
   };
-}
-
-function asArray(x: unknown): Json[] {
-  return Array.isArray(x) ? x : [];
 }

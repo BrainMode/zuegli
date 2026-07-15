@@ -93,16 +93,20 @@ export const bahnTools = {
 
   trainFormation: tool({
     description:
-      'Wagenreihung (Zugformation) eines Zuges: Wagenreihenfolge, 1./2. Klasse, Speisewagen, Familienwagen, Rollstuhlplätze, Velohaken — und pro Halt der PERRONSEKTOR, in dem die Wagen halten. Für Fragen wie „Wo hält der Speisewagen?", „In welchem Sektor halten die 1.-Klass-Wagen?", „Wo ist das Veloabteil?". Braucht die Zugnummer (trainNumber aus getDepartures/planJourney/trackTrain).',
+      'Wagenreihung (Zugformation) eines Zuges: Wagenreihenfolge, 1./2. Klasse, Speisewagen, Familienzone, Rollstuhlplätze, Velohaken — und der PERRONSEKTOR jedes Wagens am gewählten Halt. Für Fragen wie „Wo hält der Speisewagen?", „In welchem Sektor halten die 1.-Klass-Wagen?", „Wo ist das Veloabteil?". Braucht die Zugnummer (trainNumber aus getDepartures/planJourney/trackTrain). WICHTIG: stop = der Bahnhof, an dem der Nutzer einsteigt (Sektoren unterscheiden sich je Halt!).',
     inputSchema: z.object({
-      trainNumber: z.string().describe('Zugnummer, z.B. "711" (aus trainNumber der anderen Tools)'),
+      trainNumber: z.string().describe('Zugnummer, z.B. "712" (aus trainNumber der anderen Tools)'),
+      stop: z
+        .string()
+        .optional()
+        .describe('Halt, für den die Sektoren gelten sollen, z.B. "Zürich HB" — ohne Angabe erster Halt des Laufs'),
       date: z.string().optional().describe('Betriebstag YYYY-MM-DD; ohne Angabe = heute'),
       evu: z
         .string()
         .optional()
-        .describe('Bahnunternehmen, z.B. SBBP, BLSP, THURBO, SOB, RhB — ohne Angabe wird automatisch gesucht'),
+        .describe('Bahnunternehmen, z.B. SBBP, BLSP, THURBO, SOB — ohne Angabe wird automatisch gesucht'),
     }),
-    execute: async ({ trainNumber, date, evu }) => trainFormation(trainNumber, date, evu),
+    execute: async ({ trainNumber, date, evu, stop }) => trainFormation(trainNumber, date, evu, stop),
   }),
 
   getOccupancy: tool({
@@ -117,7 +121,7 @@ export const bahnTools = {
 
   getDisruptions: tool({
     description:
-      'Aktuelle Störungen im Schweizer ÖV (landesweiter Echtzeit-Feed): Unterbrüche, Ausfälle, Ersatzverkehr, Grund und Dauer. Für Fragen wie „Gibt es Störungen am Gotthard?", „Warum steht mein Zug?", „Fährt die Strecke X wieder?". Optional mit filter (Bahnhof, Strecke, Linie oder Stichwort) eingrenzen.',
+      'Aktuelle Störungen im Schweizer ÖV (landesweiter Feed, wird ca. alle 30 Minuten aktualisiert): Unterbrüche, Ausfälle, Ersatzverkehr, Grund und Dauer. Für Fragen wie „Gibt es Störungen am Gotthard?", „Warum steht mein Zug?", „Fährt die Strecke X wieder?". Optional mit filter (Bahnhof, Strecke, Linie oder Stichwort) eingrenzen.',
     inputSchema: z.object({
       filter: z
         .string()

@@ -124,15 +124,16 @@ export function registerBahnMcpTools(server: McpServer) {
     {
       title: 'Wagenreihung',
       description:
-        'Wagenreihung (Zugformation): Wagenreihenfolge, Klassen, Speisewagen, Rollstuhlplätze, Velohaken und der Perronsektor je Wagen und Halt.',
+        'Wagenreihung (Zugformation): Wagenreihenfolge, Klassen, Speisewagen, Rollstuhlplätze, Velohaken und der Perronsektor je Wagen am gewählten Halt (Parameter stop).',
       inputSchema: {
-        trainNumber: z.string().describe('Zugnummer, z.B. "711"'),
+        trainNumber: z.string().describe('Zugnummer, z.B. "712"'),
+        stop: z.string().optional().describe('Halt für die Sektorangaben, z.B. "Zürich HB"'),
         date: z.string().optional().describe('Betriebstag YYYY-MM-DD; Default heute'),
-        evu: z.string().optional().describe('Bahnunternehmen (SBBP, BLSP, THURBO, SOB, RhB …)'),
+        evu: z.string().optional().describe('Bahnunternehmen (SBBP, BLSP, THURBO, SOB …)'),
       },
     },
-    async ({ trainNumber, date, evu }) =>
-      asText(await trainFormation(trainNumber as string, date as string, evu as string)),
+    async ({ trainNumber, date, evu, stop }) =>
+      asText(await trainFormation(trainNumber as string, date as string, evu as string, stop as string)),
   );
 
   server.registerTool(
@@ -154,7 +155,7 @@ export function registerBahnMcpTools(server: McpServer) {
     {
       title: 'Störungslage',
       description:
-        'Aktuelle Störungen im Schweizer ÖV (landesweiter Echtzeit-Feed), optional nach Stichwort/Bahnhof/Linie gefiltert.',
+        'Aktuelle Störungen im Schweizer ÖV (landesweiter Feed, ca. alle 30 Minuten aktualisiert), optional nach Stichwort/Bahnhof/Linie gefiltert.',
       inputSchema: {
         filter: z.string().optional().describe('Optionales Stichwort, z.B. "Gotthard"'),
       },

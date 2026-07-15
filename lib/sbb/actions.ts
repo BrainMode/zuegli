@@ -57,6 +57,7 @@ function toError(fn: string, err: unknown) {
     if (err.code === 'nicht_konfiguriert') return NOT_CONFIGURED;
     // Fachlich leere Antworten (NO_RESULTS o.ä.) sind kein Ausfall.
     if (err.code === 'ojp_status') return { error: `Keine Daten: ${err.message}` };
+    if (err.code === 'keine_daten') return { error: 'keine_daten', hint: err.message };
   }
   return API_ERROR;
 }
@@ -280,12 +281,13 @@ function todayZurich(): string {
   return new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Zurich' });
 }
 
-/** Wagenreihung inkl. Perronsektoren. date = YYYY-MM-DD (Default: heute). */
-export async function trainFormation(trainNumber: string, date?: string, evu?: string) {
+/** Wagenreihung inkl. Perronsektoren. date = YYYY-MM-DD (Default: heute); stop wählt den Halt für die Sektorangaben. */
+export async function trainFormation(trainNumber: string, date?: string, evu?: string, stop?: string) {
   const d = date ?? todayZurich();
-  return cached(`formation:${trainNumber}:${d}:${evu ?? 'auto'}`, 120, async () => {
+  const key = `formation:${trainNumber}:${d}:${evu ?? 'auto'}:${stop?.trim().toLowerCase() ?? ''}`;
+  return cached(key, 120, async () => {
     try {
-      return await formation(trainNumber, d, evu);
+      return await formation(trainNumber, d, evu, stop);
     } catch (err) {
       return toError('trainFormation', err);
     }

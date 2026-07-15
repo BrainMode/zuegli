@@ -75,7 +75,7 @@ const hhmm = (iso) =>
 let olten = null;
 let firstJourneyRef = null;
 let firstDayRef = null;
-let firstTrainNumber = null;
+const trainNumbers = []; // Kandidaten für Formation (SBB-Züge bevorzugt)
 
 await section('1) LocationInformation("Olten") …', async () => {
   const xml = await ojp(`<OJPLocationInformationRequest>
@@ -115,8 +115,11 @@ await section('2) StopEvents(Olten, departures) …', async () => {
     if (!firstJourneyRef) {
       firstJourneyRef = el(se, 'JourneyRef');
       firstDayRef = el(se, 'OperatingDayRef');
-      firstTrainNumber = trainNo;
     }
+    // IC/IR mit kleiner Nummer = fast sicher SBB (ICE/TGV etc. haben oft keine Formation)
+    const name = textOf(el(se, 'PublishedServiceName')) ?? '';
+    if (trainNo && /^(IC|IR)/.test(name)) trainNumbers.unshift(trainNo);
+    else if (trainNo) trainNumbers.push(trainNo);
     console.log(
       `   ${String(textOf(el(se, 'PublishedServiceName')) ?? '?').padEnd(6)} → ${textOf(el(se, 'DestinationText'))}  plan ${hhmm(plan)}  ist ${hhmm(est ?? plan)}  Gl. ${quay ?? '–'}  Nr. ${trainNo ?? '–'}`,
     );
@@ -181,29 +184,36 @@ await section('4) TripInfo(erster Zug aus 2) …', async () => {
 });
 
 await section('5) Formation (Wagenreihung) …', async () => {
-  if (!firstTrainNumber) throw new Error('keine Zugnummer aus Sektion 2');
+  if (trainNumbers.length === 0) throw new Error('keine Zugnummer aus Sektion 2');
   const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Zurich' });
   const fKey = process.env.OTD_FORMATION_KEY ?? KEY;
-  const res = await fetch(
-    `https://api.opentransportdata.swiss/formation/v2/formations_full?evu=SBBP&operationDate=${today}&trainNumber=${firstTrainNumber}`,
-    { headers: { Authorization: `Bearer ${fKey}` } },
-  );
-  if (!res.ok) {
-    throw new Error(
-      `HTTP ${res.status} — ${(await res.text()).slice(0, 150)} ` +
-        '(Formation ist ein SEPARATES API-Produkt im API-Manager → abonnieren bzw. OTD_FORMATION_KEY setzen; oder der Zug ist kein SBBP-Zug.)',
+  for (const trainNo of trainNumbers.slice(0, 3)) {
+    const res = await fetch(
+      `https://api.opentransportdata.swiss/formation/v2/formations_full?evu=SBBP&operationDate=${today}&trainNumber=${trainNo}`,
+      { headers: { Authorization: `Bearer ${fKey}` } },
     );
+    if (!res.ok) {
+      throw new Error(
+        `HTTP ${res.status} — ${(await res.text()).slice(0, 150)} ` +
+          '(Formation ist ein SEPARATES API-Produkt im API-Manager → abonnieren bzw. OTD_FORMATION_KEY setzen.)',
+      );
+    }
+    const f = await res.json();
+    // Verifiziertes Schema: formationsAtScheduledStops[] + formations[].formationVehicles[]
+    const stops = f.formationsAtScheduledStops ?? [];
+    const vehicles = f.formations?.[0]?.formationVehicles ?? [];
+    console.log(`   Zug ${trainNo}: ${vehicles.length} Wagen, ${stops.length} Halte`);
+    if (vehicles.length === 0 && stops.length === 0) continue; // kein SBBP-Zug → nächsten probieren
+    const s0 = stops[0]?.scheduledStop;
+    if (s0) console.log(`   1. Halt: ${s0.stopPoint?.name}  Gleis ${s0.track ?? '–'}`);
+    const dining = vehicles.find((v) => Number(v.vehicleProperties?.numberRestaurantSpace) > 0);
+    const first = vehicles.find((v) => Number(v.vehicleProperties?.number1class) > 0);
+    const sec = (v) => v?.formationVehicleAtScheduledStops?.[0]?.sectors ?? '–';
+    if (dining) console.log(`   Speisewagen: Wagen ${dining.number}, Sektor ${sec(dining)}`);
+    if (first) console.log(`   1. Klasse ab Wagen ${first.number}, Sektor ${sec(first)}`);
+    return;
   }
-  const f = await res.json();
-  const stops = f.scheduledStops ?? [];
-  const vehicles = f.formationVehicles ?? f.vehicles ?? [];
-  console.log(`   Zug ${firstTrainNumber}: ${vehicles.length} Wagen, ${stops.length} Halte`);
-  if (stops[0])
-    console.log(
-      `   1. Halt: ${stops[0].stopPoint?.name}  Gleis ${stops[0].track?.text ?? '–'}  Sektoren: ${stops[0].formationShortString ?? '–'}`,
-    );
-  if (vehicles[0])
-    console.log(`   1. Wagen (Felder): ${Object.keys(vehicles[0].vehicleProperties ?? vehicles[0]).join(', ')}`);
+  throw new Error('Keiner der Kandidaten-Züge hat SBBP-Formationsdaten (Antwort war leer).');
 });
 
 await section('6) Belegungsprognose (Dataset-Discovery) …', async () => {
@@ -221,10 +231,13 @@ await section('6) Belegungsprognose (Dataset-Discovery) …', async () => {
   console.log('   Import lokal testen: Server starten und GET /api/cron/occupancy aufrufen.');
 });
 
-await section('7) SIRI-SX (Störungen, unplanned) …', async () => {
+await section('7) SIRI-SX (Störungen, Voll-Feed) …', async () => {
+  // ACHTUNG: Das Abo erlaubt nur 48 Abfragen/Tag — jeder Smoke-Lauf kostet eine!
+  console.log('   (verbraucht 1 von 48 Tages-Abfragen des Abos)');
+  const { gunzipSync } = await import('node:zlib');
   const sxKey = process.env.OTD_SIRI_SX_KEY ?? KEY;
   const res = await fetch(
-    process.env.OTD_SIRI_SX_URL ?? 'https://api.opentransportdata.swiss/la/siri-sx-unplanned',
+    process.env.OTD_SIRI_SX_URL ?? 'https://api.opentransportdata.swiss/la/siri-sx',
     { headers: { Authorization: `Bearer ${sxKey}` } },
   );
   if (!res.ok) {
@@ -233,12 +246,15 @@ await section('7) SIRI-SX (Störungen, unplanned) …', async () => {
         '(SIRI-SX ist ein SEPARATES API-Produkt im API-Manager → abonnieren bzw. OTD_SIRI_SX_KEY setzen.)',
     );
   }
-  const sx = await res.text();
-  const situations = els(sx, 'PtSituationElement');
-  console.log(`   ${situations.length} Situationen`);
-  if (situations[0]) {
+  // Redirect auf signierte URL liefert eine gzip-DATEI (~106 MB XML).
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const sx = (bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes).toString('utf-8');
+  const count = (sx.match(/<PtSituationElement>/g) ?? []).length;
+  console.log(`   ${count} Situationen (${Math.round(bytes.length / 1024 / 1024)} MB gzip)`);
+  const first = el(sx, 'PtSituationElement');
+  if (first) {
     console.log(
-      `   Erste: ${textOf(el(situations[0], 'Summary'))} (Severity: ${el(situations[0], 'Severity') ?? '–'})`,
+      `   Erste: ${textOf(el(first, 'Summary'))} (Severity: ${el(first, 'Severity') ?? '–'})`,
     );
   }
 });
