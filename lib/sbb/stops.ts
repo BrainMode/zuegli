@@ -165,3 +165,17 @@ export function resolveStop(index: StopIndex, ref: string): [number, number] | n
   if (digits) return index.uic[digits] ?? null;
   return null;
 }
+
+/**
+ * Kanonischer Kurz-Key eines Halts (für Fahrweg-Segmente): sloid-Tail für
+ * Schweizer Halte ("ch:1:sloid:91036" → "91036", UIC 8503000 → "3000"),
+ * volle Ziffern für ausländische (dort gibt es keine Fahrweg-Segmente).
+ */
+export function stopKey(ref: string): string | null {
+  const sloid = /^ch:1:sloid:(\d+)/.exec(ref)?.[1];
+  if (sloid) return sloid;
+  const digits = /(\d{6,})/.exec(ref)?.[1];
+  if (!digits) return null;
+  const ch = /^85(\d{5})$/.exec(digits)?.[1];
+  return ch ? String(Number(ch)) : digits;
+}

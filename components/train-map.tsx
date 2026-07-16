@@ -17,6 +17,7 @@ import {
   TIER_LABELS,
   TIER_MIN_ZOOM,
   type LiveCall,
+  type Segment,
 } from '@/lib/map/position';
 
 const STYLE_URL = 'https://vectortiles.geo.admin.ch/styles/ch.swisstopo.lightbasemap.vt/style.json';
@@ -69,6 +70,10 @@ export default function TrainMap() {
   const activeTiers = useRef<Set<number>>(new Set());
   const enabledRef = useRef<Record<number, boolean>>({ 1: true, 2: true, 3: true, 4: true });
   const viewBBox = useRef<[number, number, number, number]>([-180, -90, 180, 90]);
+  // Fahrweg-Segmente: pairKey → Polyline | null (kein Fahrweg) | fehlt (=nie gefragt).
+  const segments = useRef<Map<string, Segment | null>>(new Map());
+  const wantedPairs = useRef<Set<string>>(new Set());
+  const pendingPairs = useRef<Set<string>>(new Set());
   const [enabled, setEnabled] = useState<Record<number, boolean>>({ 1: true, 2: true, 3: true, 4: true });
   const [stale, setStale] = useState(false);
   const [count, setCount] = useState(0);
@@ -164,14 +169,53 @@ export default function TrainMap() {
       for (const t of activeTiers.current) void fetchTier(t);
     };
 
+    // Fahrweg-Segmente nachladen: alle 2.5 s bis zu 40 der gerade gebrauchten
+    // Paare anfragen. Der Server lernt Unbekannte nach und nach von OJP —
+    // ausbleibende Antworten einfach beim nächsten Tick erneut versuchen.
+    const SEG_LRU_MAX = 4000;
+    const askedAt = new Map<string, number>(); // Cooldown: Paar nicht öfter als alle 12 s anfragen
+    const segTimer = setInterval(async () => {
+      if (document.hidden || wantedPairs.current.size === 0) return;
+      const now = Date.now();
+      const batch = [...wantedPairs.current]
+        .filter((p) => !pendingPairs.current.has(p) && (askedAt.get(p) ?? 0) < now - 12_000)
+        .slice(0, 40);
+      wantedPairs.current.clear();
+      if (batch.length === 0) return;
+      for (const p of batch) {
+        pendingPairs.current.add(p);
+        askedAt.set(p, now);
+      }
+      if (askedAt.size > 8000) askedAt.clear();
+      try {
+        const res = await fetch(`/api/shape?pairs=${batch.join(',')}`);
+        if (res.ok) {
+          const data = (await res.json()) as { segments: Record<string, Segment | null> };
+          for (const [pair, seg] of Object.entries(data.segments)) {
+            if (segments.current.size >= SEG_LRU_MAX) {
+              const oldest = segments.current.keys().next().value;
+              if (oldest !== undefined) segments.current.delete(oldest);
+            }
+            segments.current.set(pair, seg);
+          }
+        }
+      } catch {
+        /* nächster Tick */
+      } finally {
+        for (const p of batch) pendingPairs.current.delete(p);
+      }
+    }, 4000);
+
     const bboxIntersects = (a: [number, number, number, number]) => {
       const v = viewBBox.current;
       return a[0] <= v[2] && a[2] >= v[0] && a[1] <= v[3] && a[3] >= v[1];
     };
 
     // Debug-Fenster (harmlos in Prod): Zustand des Render-Loops einsehbar.
-    const dbg = { frames: 0, srcMissing: 0, lastFeatures: 0, skipTier: 0, skipBBox: 0, skipPos: 0 };
-    (window as unknown as Record<string, unknown>).__zuegliDbg = dbg;
+    const dbg = { frames: 0, srcMissing: 0, lastFeatures: 0, skipTier: 0, skipBBox: 0, skipPos: 0, segs: 0, segWanted: 0 };
+    const w = window as unknown as Record<string, unknown>;
+    w.__zuegliDbg = dbg;
+    w.__zuegliMap = map;
 
     const frame = (ts: number) => {
       raf = requestAnimationFrame(frame);
@@ -200,7 +244,14 @@ export default function TrainMap() {
             dbg.skipBBox++;
             continue; // Viewport-Culling
           }
-          const pos = trainPosition(tr.c, nowSec);
+          const pos = trainPosition(
+            tr.c,
+            nowSec,
+            (pair) => segments.current.get(pair),
+            (pair) => {
+              if (!pendingPairs.current.has(pair)) wantedPairs.current.add(pair);
+            },
+          );
           if (!pos) {
             dbg.skipPos++;
             continue;
@@ -220,6 +271,8 @@ export default function TrainMap() {
         }
       }
       dbg.lastFeatures = features.length;
+      dbg.segs = segments.current.size;
+      dbg.segWanted = wantedPairs.current.size;
       if (countRef.current !== features.length) {
         countRef.current = features.length;
         setCount(features.length);
@@ -282,6 +335,7 @@ export default function TrainMap() {
       clearTimeout(styleFallback);
       cancelAnimationFrame(raf);
       if (fetchTimer) clearInterval(fetchTimer);
+      clearInterval(segTimer);
       document.removeEventListener('visibilitychange', onVisible);
       map.remove();
       mapRef.current = null;

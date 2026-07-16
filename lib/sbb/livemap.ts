@@ -11,7 +11,7 @@
 import { gzipSync, gunzipSync, strFromU8, strToU8 } from 'fflate';
 import { cachePut, cacheGet } from '../cache';
 import { ojpParser, arr, txt } from './client';
-import { loadStopIndex, resolveStop, type StopIndex } from './stops';
+import { loadStopIndex, resolveStop, stopKey, type StopIndex } from './stops';
 
 const SIRI_ET_URL = process.env.OTD_SIRIET_URL ?? 'https://api.opentransportdata.swiss/la/siri-et';
 const MIN_INTERVAL_SEC = Number(process.env.LIVEMAP_MIN_INTERVAL_SEC ?? 55);
@@ -19,7 +19,8 @@ const WINDOW_PAST_SEC = 10 * 60;
 const WINDOW_FUTURE_SEC = 60 * 60;
 const BLOB_LIMIT = 900 * 1024;
 
-export type LiveCall = [lon: number, lat: number, arr: number, dep: number];
+// 5. Element: kanonischer Halt-Key (sloid-Tail) — Join-Key für Fahrweg-Segmente.
+export type LiveCall = [lon: number, lat: number, arr: number, dep: number, key: string];
 export type LiveTrain = {
   r: string;
   l: string;
@@ -90,9 +91,10 @@ function compactJourney(j: Pt, stops: StopIndex, nowSec: number, futureSec: numb
     const d = depT ?? arrT;
     if (a == null || d == null) continue;
     if (d < nowSec - WINDOW_PAST_SEC || a > nowSec + futureSec) continue;
-    const pos = resolveStop(stops, txt(c.StopPointRef) ?? '');
+    const ref = txt(c.StopPointRef) ?? '';
+    const pos = resolveStop(stops, ref);
     if (!pos) continue;
-    calls.push([pos[0], pos[1], a, d]);
+    calls.push([pos[0], pos[1], a, d, stopKey(ref) ?? '']);
     // Verspätung + nächster Halt: erster Call, der noch bevorsteht.
     if (ns === undefined && d >= nowSec) {
       ns = txt(c.StopPointName) ?? undefined;

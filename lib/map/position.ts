@@ -1,11 +1,57 @@
 // Pure Client-Helfer für beide Karten: Position eines Fahrzeugs aus seinen
-// Halt-Zeiten interpolieren (Luftlinie zwischen Halten, v1) + Tier-Farben.
+// Halt-Zeiten interpolieren — entlang des echten Fahrwegs (Segment-Polyline),
+// wenn vorhanden, sonst Luftlinie. Plus Tier-Farben.
 
-export type LiveCall = [lon: number, lat: number, arr: number, dep: number];
+export type LiveCall = [lon: number, lat: number, arr: number, dep: number, key?: string];
+export type Segment = [number, number][];
 
+// Kumulierte Längen je Segment cachen (Bogenlängen-Parametrisierung).
+const lengthCache = new WeakMap<Segment, number[]>();
+
+function cumulative(seg: Segment): number[] {
+  let cum = lengthCache.get(seg);
+  if (cum) return cum;
+  cum = [0];
+  for (let i = 1; i < seg.length; i++) {
+    const dx = seg[i][0] - seg[i - 1][0];
+    // Längen in "Grad-Metrik" reichen — nur die VERHÄLTNISSE zählen; cos(lat)
+    // korrigiert die Ost-West-Verzerrung, damit Kurven gleichmässig ablaufen.
+    const dy = (seg[i][1] - seg[i - 1][1]) / Math.cos((seg[i][1] * Math.PI) / 180);
+    cum.push(cum[i - 1] + Math.hypot(dx, dy));
+  }
+  lengthCache.set(seg, cum);
+  return cum;
+}
+
+/** Punkt bei Anteil f (0..1) der Bogenlänge einer Polyline. */
+export function pathPosition(seg: Segment, f: number): { lon: number; lat: number } {
+  const cum = cumulative(seg);
+  const target = Math.max(0, Math.min(1, f)) * cum[cum.length - 1];
+  // Binärsuche nach dem Teilstück
+  let lo = 0;
+  let hi = cum.length - 1;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] <= target) lo = mid;
+    else hi = mid;
+  }
+  const span = cum[hi] - cum[lo];
+  const t = span > 0 ? (target - cum[lo]) / span : 0;
+  return {
+    lon: seg[lo][0] + (seg[hi][0] - seg[lo][0]) * t,
+    lat: seg[lo][1] + (seg[hi][1] - seg[lo][1]) * t,
+  };
+}
+
+/**
+ * Position aus den Halt-Zeiten. `segmentFor(pairKey)` darf fehlen (Luftlinie)
+ * oder undefined liefern („Segment (noch) unbekannt" — Aufrufer kann es laden).
+ */
 export function trainPosition(
   c: LiveCall[],
   nowSec: number,
+  segmentFor?: (pairKey: string) => Segment | null | undefined,
+  onMissing?: (pairKey: string) => void,
 ): { lon: number; lat: number; moving: boolean } | null {
   if (!c || c.length === 0) return null;
   const first = c[0];
@@ -21,6 +67,14 @@ export function trainPosition(
     const next = c[i + 1];
     if (next && nowSec > dep && nowSec < next[2]) {
       const f = (nowSec - dep) / Math.max(1, next[2] - dep);
+      const keyA = c[i][4];
+      const keyB = next[4];
+      if (segmentFor && keyA && keyB) {
+        const pairKey = `${keyA}-${keyB}`;
+        const seg = segmentFor(pairKey);
+        if (seg) return { ...pathPosition(seg, f), moving: true };
+        if (seg === undefined) onMissing?.(pairKey);
+      }
       return {
         lon: lon + (next[0] - lon) * f,
         lat: lat + (next[1] - lat) * f,
