@@ -220,7 +220,13 @@ export default function TrainMap() {
 
     const frame = (ts: number) => {
       raf = requestAnimationFrame(frame);
-      if (ts - lastFrame < 100) return; // ~10 fps reicht für ruhige Bewegung
+      // Adaptive Framerate: jedes setData() erzwingt einen kompletten WebGL-
+      // Repaint der Vektorkarte. Rausgezoomt bewegen sich Punkte pro Frame um
+      // Subpixel — 2 fps reichen dort und senken die GPU-Last massiv;
+      // reingezoomt bleiben 10 fps für flüssige Bewegung.
+      const z = map.getZoom();
+      const interval = z >= 12 ? 100 : z >= 9 ? 250 : 500;
+      if (ts - lastFrame < interval) return;
       lastFrame = ts;
       if (document.hidden) return;
       dbg.frames++;
@@ -230,7 +236,6 @@ export default function TrainMap() {
         return;
       }
       const nowSec = Date.now() / 1000;
-      const z = map.getZoom();
       const features: GeoJSON.Feature[] = [];
       for (const t of [1, 2, 3, 4]) {
         if (z < TIER_MIN_ZOOM[t] || !enabledRef.current[t]) {
