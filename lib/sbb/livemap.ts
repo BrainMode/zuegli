@@ -30,6 +30,7 @@ export type LiveTrain = {
   x?: 1;
   dl?: number;
   ns?: string;
+  ni?: number; // Index des Calls, auf den sich ns/dl beziehen (Client prüft Frische)
   c: LiveCall[];
 };
 export type LiveTier = { t: number; trains: LiveTrain[] };
@@ -80,6 +81,7 @@ function compactJourney(j: Pt, stops: StopIndex, nowSec: number, futureSec: numb
   const calls: LiveCall[] = [];
   let dl: number | undefined;
   let ns: string | undefined;
+  let ni: number | undefined;
   for (const c of rawCalls) {
     const aimedArr = epoch(txt(c.AimedArrivalTime));
     const expArr = epoch(txt(c.ExpectedArrivalTime));
@@ -106,6 +108,7 @@ function compactJourney(j: Pt, stops: StopIndex, nowSec: number, futureSec: numb
     // Verspätung + nächster Halt: erster Call, der noch bevorsteht.
     if (ns === undefined && d >= nowSec) {
       ns = txt(c.StopPointName) ?? undefined;
+      ni = calls.length - 1; // Index dieses Calls im kompakten Array
       const aimed = aimedDep ?? aimedArr;
       const exp = expDep ?? expArr;
       if (aimed != null && exp != null) {
@@ -128,6 +131,7 @@ function compactJourney(j: Pt, stops: StopIndex, nowSec: number, futureSec: numb
     ...(String(j.Cancellation) === 'true' ? { x: 1 as const } : {}),
     ...(dl !== undefined ? { dl } : {}),
     ...(ns !== undefined ? { ns } : {}),
+    ...(ni !== undefined ? { ni } : {}),
     c: calls,
   };
 }

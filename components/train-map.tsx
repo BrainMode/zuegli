@@ -45,6 +45,7 @@ type LiveTrain = {
   x?: 1;
   dl?: number;
   ns?: string;
+  ni?: number;
   c: LiveCall[];
 };
 
@@ -260,6 +261,11 @@ export default function TrainMap() {
             dbg.skipPos++;
             continue;
           }
+          // "Nächster Halt"/Verspätung nur zeigen, solange das Fahrzeug den
+          // Snapshot-Referenzhalt (ni) noch nicht passiert hat — sonst zeigte
+          // das Popup bis zum nächsten Snapshot einen bereits passierten Halt
+          // (wirkte wie "fährt in die falsche Richtung").
+          const nsFresh = tr.ni !== undefined && pos.next === tr.ni;
           features.push({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [pos.lon, pos.lat] },
@@ -268,8 +274,8 @@ export default function TrainMap() {
               line: tr.l,
               num: tr.n ?? '',
               dir: tr.d,
-              dl: tr.dl ?? 0,
-              ns: tr.ns ?? '',
+              dl: nsFresh ? (tr.dl ?? 0) : 0,
+              ns: nsFresh ? (tr.ns ?? '') : '',
             },
           });
         }

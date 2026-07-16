@@ -52,18 +52,22 @@ export function trainPosition(
   nowSec: number,
   segmentFor?: (pairKey: string) => Segment | null | undefined,
   onMissing?: (pairKey: string) => void,
-): { lon: number; lat: number; moving: boolean } | null {
+): { lon: number; lat: number; moving: boolean; next: number } | null {
+  // `next` = Index des Calls, auf den das Fahrzeug gerade zufährt bzw. an dem
+  // es steht — erlaubt dem Popup, veraltete "Nächster Halt"-Labels zu erkennen.
   if (!c || c.length === 0) return null;
   const first = c[0];
   const last = c[c.length - 1];
-  if (nowSec <= first[2]) return { lon: first[0], lat: first[1], moving: false };
+  if (nowSec <= first[2]) return { lon: first[0], lat: first[1], moving: false, next: 0 };
   if (nowSec >= last[3]) {
     // Nach dem letzten bekannten Halt noch kurz stehen lassen, dann ausblenden.
-    return nowSec > last[3] + 120 ? null : { lon: last[0], lat: last[1], moving: false };
+    return nowSec > last[3] + 120
+      ? null
+      : { lon: last[0], lat: last[1], moving: false, next: c.length - 1 };
   }
   for (let i = 0; i < c.length; i++) {
     const [lon, lat, arr, dep] = c[i];
-    if (nowSec >= arr && nowSec <= dep) return { lon, lat, moving: false }; // am Halt
+    if (nowSec >= arr && nowSec <= dep) return { lon, lat, moving: false, next: i }; // am Halt
     const next = c[i + 1];
     if (next && nowSec > dep && nowSec < next[2]) {
       const f = (nowSec - dep) / Math.max(1, next[2] - dep);
@@ -72,17 +76,18 @@ export function trainPosition(
       if (segmentFor && keyA && keyB) {
         const pairKey = `${keyA}-${keyB}`;
         const seg = segmentFor(pairKey);
-        if (seg) return { ...pathPosition(seg, f), moving: true };
+        if (seg) return { ...pathPosition(seg, f), moving: true, next: i + 1 };
         if (seg === undefined) onMissing?.(pairKey);
       }
       return {
         lon: lon + (next[0] - lon) * f,
         lat: lat + (next[1] - lat) * f,
         moving: true,
+        next: i + 1,
       };
     }
   }
-  return { lon: last[0], lat: last[1], moving: false };
+  return { lon: last[0], lat: last[1], moving: false, next: c.length - 1 };
 }
 
 export const TIER_COLORS: Record<number, string> = {
