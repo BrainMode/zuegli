@@ -95,7 +95,7 @@ function projectionTripRequest(fromRef: string, toRef: string): string {
           <PlaceRef><siri:StopPointRef>${toRef}</siri:StopPointRef><Name><Text>-</Text></Name></PlaceRef>
         </Destination>
         <Params>
-          <NumberOfResults>1</NumberOfResults>
+          <NumberOfResults>4</NumberOfResults>
           <UseRealtimeData>none</UseRealtimeData>
           <IncludeLegProjection>true</IncludeLegProjection>
         </Params>
@@ -104,14 +104,36 @@ function projectionTripRequest(fromRef: string, toRef: string): string {
 
 type Pt = Record<string, any>;
 
-/** Extrahiert die Projektion des ERSTEN TimedLeg (Nachbarhalte → direkter Leg). */
-function extractProjection(delivery: Pt): Segment | null {
-  const results = arr(delivery.TripResult);
-  for (const r of results) {
-    const legs = arr((r as Pt).Trip?.Leg);
-    for (const leg of legs) {
+export type ModeClass = 'r' | 't' | 'b'; // rail | tram/metro | bus/übrige
+
+/** Passt der PtMode eines Legs zur Verkehrsmittel-Klasse des Fahrzeugs? */
+function modeMatches(cls: ModeClass, ptMode: string): boolean {
+  if (cls === 'r') return ptMode === 'rail';
+  if (cls === 't') return ptMode === 'tram' || ptMode === 'metro';
+  // Bus-Klasse: alles Strassen-/Wassergebundene, aber NIE Schiene — sonst
+  // bekäme ein Bus-Paar die Geometrie eines parallelen Zugs.
+  return ptMode !== 'rail' && ptMode !== 'tram' && ptMode !== 'metro';
+}
+
+function sloidTail(ref: string | null): string | null {
+  return ref ? (/^ch:1:sloid:(\d+)/.exec(ref)?.[1] ?? null) : null;
+}
+
+/**
+ * Extrahiert die Projektion des ersten TimedLeg, der (a) im richtigen
+ * Verkehrsmittel fährt und (b) wirklich DIREKT von a nach b führt.
+ * WICHTIG (Nutzer-Fund R24 Luzern): ohne Modus-Check bekam ein ZUG-Paar die
+ * Geometrie der nächstbesten BUS-Verbindung — der Zug fuhr dann über Strassen.
+ */
+function extractProjection(delivery: Pt, cls: ModeClass, a: string, b: string): Segment | null {
+  for (const r of arr(delivery.TripResult)) {
+    for (const leg of arr((r as Pt).Trip?.Leg)) {
       const timed = (leg as Pt).TimedLeg;
       if (!timed) continue;
+      const ptMode = txt(timed.Service?.Mode?.PtMode) ?? '';
+      const boardKey = sloidTail(txt(timed.LegBoard?.StopPointRef));
+      const alightKey = sloidTail(txt(timed.LegAlight?.StopPointRef));
+      if (!modeMatches(cls, ptMode) || boardKey !== a || alightKey !== b) continue;
       const points: Segment = [];
       for (const section of arr(timed.LegTrack?.TrackSection)) {
         for (const p of arr((section as Pt).LinkProjection?.Position)) {
@@ -120,8 +142,7 @@ function extractProjection(delivery: Pt): Segment | null {
           if (Number.isFinite(lon) && Number.isFinite(lat)) points.push([lon, lat]);
         }
       }
-      // Nur der ERSTE Fahr-Leg zählt — hat er keine Projektion, gibt es keine.
-      return points.length >= 2 ? points : null;
+      if (points.length >= 2) return points;
     }
   }
   return null;
@@ -134,12 +155,12 @@ function keyToRef(key: string): string | null {
   return `ch:1:sloid:${key}`;
 }
 
-async function fetchSegment(a: string, b: string): Promise<Segment | null> {
+async function fetchSegment(cls: ModeClass, a: string, b: string): Promise<Segment | null> {
   const refA = keyToRef(a);
   const refB = keyToRef(b);
   if (!refA || !refB) return null;
   const delivery = await ojpRequest(projectionTripRequest(refA, refB), 'OJPTripDelivery');
-  const raw = extractProjection(delivery as Pt);
+  const raw = extractProjection(delivery as Pt, cls, a, b);
   if (!raw) return null;
   return simplify(raw).map(([lon, lat]) => [Math.round(lon * 1e5) / 1e5, Math.round(lat * 1e5) / 1e5]);
 }
@@ -161,9 +182,10 @@ function memRemember(key: string, value: Segment | null) {
 }
 
 /**
- * Liefert Segmente für Halt-Paare ("keyA-keyB"). Unbekannte werden bis
- * maxFetch Stück live von OJP geholt (zählt ins OTD-Tagesbudget), der Rest
- * bleibt in dieser Antwort einfach weg — der Client fragt später erneut.
+ * Liefert Segmente für Paare im Format "<cls>:keyA-keyB" (cls: r|t|b).
+ * Unbekannte werden bis maxFetch Stück live von OJP geholt (zählt ins
+ * OTD-Tagesbudget), der Rest bleibt in dieser Antwort weg — der Client
+ * fragt später erneut.
  */
 export async function getSegments(
   pairs: string[],
@@ -186,13 +208,13 @@ export async function getSegments(
     if (fetched >= maxFetch) continue; // später wieder — Client pollt erneut
     if (!(await underMinuteCap(1))) break; // Minuten-Deckel erreicht → Rest später
     fetched++;
-    const [a, b] = pair.split('-');
-    if (!a || !b) {
+    const m = /^([rtb]):(\d+)-(\d+)$/.exec(pair);
+    if (!m) {
       out[pair] = null;
       continue;
     }
     try {
-      const seg = await fetchSegment(a, b);
+      const seg = await fetchSegment(m[1] as ModeClass, m[2], m[3]);
       memRemember(pair, seg);
       out[pair] = seg;
       await cachePut(`shape:${pair}`, seg ? SEG_TTL : MISS_TTL, seg ?? MISS);

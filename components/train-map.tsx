@@ -244,12 +244,16 @@ export default function TrainMap() {
             dbg.skipBBox++;
             continue; // Viewport-Culling
           }
+          // Verkehrsmittel-Klasse in den Segment-Key (ein ZUG-Paar darf nie die
+          // Geometrie einer parallelen BUS-Verbindung erben und umgekehrt).
+          const cls = tr.m <= 2 ? 'r' : tr.m === 3 ? 't' : 'b';
           const pos = trainPosition(
             tr.c,
             nowSec,
-            (pair) => segments.current.get(pair),
+            (pair) => segments.current.get(`${cls}:${pair}`),
             (pair) => {
-              if (!pendingPairs.current.has(pair)) wantedPairs.current.add(pair);
+              const key = `${cls}:${pair}`;
+              if (!pendingPairs.current.has(key)) wantedPairs.current.add(key);
             },
           );
           if (!pos) {

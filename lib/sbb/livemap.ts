@@ -94,7 +94,15 @@ function compactJourney(j: Pt, stops: StopIndex, nowSec: number, futureSec: numb
     const ref = txt(c.StopPointRef) ?? '';
     const pos = resolveStop(stops, ref);
     if (!pos) continue;
-    calls.push([pos[0], pos[1], a, d, stopKey(ref) ?? '']);
+    const key = stopKey(ref) ?? '';
+    const prev = calls[calls.length - 1];
+    if (prev && key !== '' && prev[4] === key) {
+      // Naht RecordedCalls/EstimatedCalls dupliziert den Grenzhalt → mergen
+      // (frühere Ankunft behalten, spätere Abfahrt übernehmen).
+      prev[3] = Math.max(prev[3], d);
+      continue;
+    }
+    calls.push([pos[0], pos[1], a, d, key]);
     // Verspätung + nächster Halt: erster Call, der noch bevorsteht.
     if (ns === undefined && d >= nowSec) {
       ns = txt(c.StopPointName) ?? undefined;

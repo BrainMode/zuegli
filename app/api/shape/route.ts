@@ -8,9 +8,9 @@ export const maxDuration = 30;
 
 export async function GET(req: Request) {
   const raw = new URL(req.url).searchParams.get('pairs') ?? '';
-  const pairs = [...new Set(raw.split(',').map((p) => p.trim()).filter((p) => /^\d+-\d+$/.test(p)))].slice(0, 40);
+  const pairs = [...new Set(raw.split(',').map((p) => p.trim()).filter((p) => /^[rtb]:\d+-\d+$/.test(p)))].slice(0, 40);
   if (pairs.length === 0) {
-    return Response.json({ error: 'pairs fehlt (Format keyA-keyB,…)' }, { status: 400 });
+    return Response.json({ error: 'pairs fehlt (Format r|t|b:keyA-keyB,…)' }, { status: 400 });
   }
   const segments = await getSegments(pairs);
   // KEIN CDN-Cache: während der Lernphase wiederholen Clients dieselbe
