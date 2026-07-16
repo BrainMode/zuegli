@@ -83,7 +83,28 @@ export function simplify(points: Segment, tolerance = 0.0001): Segment {
 
 // ── OJP-Fetch eines Segments ────────────────────────────────────────────────
 
-function projectionTripRequest(fromRef: string, toRef: string): string {
+type Pt = Record<string, any>;
+
+export type ModeClass = 'r' | 't' | 'b'; // rail | tram/metro | bus/übrige
+
+/**
+ * Modusfilter je Klasse (Syntax gegen den Schweizer OJP verifiziert):
+ * WICHTIG: ohne <Exclude>false</Exclude> wirkt der Filter als AUSSCHLUSS.
+ * Ohne Filter verdrängen häufige Busse die Bahn aus den Ergebnissen
+ * (Nutzer-Fund S6 Luzern–Littau: alle Kandidaten waren Busse → Miss-Marker
+ * fürs Bahn-Segment, Zug fuhr Luftlinie).
+ */
+function modeFilter(cls: ModeClass): string {
+  if (cls === 'r') {
+    return '<ModeAndModeOfOperationFilter><Exclude>false</Exclude><PtMode>rail</PtMode></ModeAndModeOfOperationFilter>';
+  }
+  if (cls === 't') {
+    return '<ModeAndModeOfOperationFilter><Exclude>false</Exclude><PtMode>tram</PtMode><PtMode>metro</PtMode></ModeAndModeOfOperationFilter>';
+  }
+  return '<ModeAndModeOfOperationFilter><Exclude>true</Exclude><PtMode>rail</PtMode><PtMode>tram</PtMode><PtMode>metro</PtMode></ModeAndModeOfOperationFilter>';
+}
+
+function projectionTripRequest(cls: ModeClass, fromRef: string, toRef: string): string {
   const now = stamp();
   return `<OJPTripRequest>
         <siri:RequestTimestamp>${now}</siri:RequestTimestamp>
@@ -95,16 +116,13 @@ function projectionTripRequest(fromRef: string, toRef: string): string {
           <PlaceRef><siri:StopPointRef>${toRef}</siri:StopPointRef><Name><Text>-</Text></Name></PlaceRef>
         </Destination>
         <Params>
-          <NumberOfResults>4</NumberOfResults>
+          ${modeFilter(cls)}
+          <NumberOfResults>3</NumberOfResults>
           <UseRealtimeData>none</UseRealtimeData>
           <IncludeLegProjection>true</IncludeLegProjection>
         </Params>
       </OJPTripRequest>`;
 }
-
-type Pt = Record<string, any>;
-
-export type ModeClass = 'r' | 't' | 'b'; // rail | tram/metro | bus/übrige
 
 /** Passt der PtMode eines Legs zur Verkehrsmittel-Klasse des Fahrzeugs? */
 function modeMatches(cls: ModeClass, ptMode: string): boolean {
@@ -159,7 +177,7 @@ async function fetchSegment(cls: ModeClass, a: string, b: string): Promise<Segme
   const refA = keyToRef(a);
   const refB = keyToRef(b);
   if (!refA || !refB) return null;
-  const delivery = await ojpRequest(projectionTripRequest(refA, refB), 'OJPTripDelivery');
+  const delivery = await ojpRequest(projectionTripRequest(cls, refA, refB), 'OJPTripDelivery');
   const raw = extractProjection(delivery as Pt, cls, a, b);
   if (!raw) return null;
   return simplify(raw).map(([lon, lat]) => [Math.round(lon * 1e5) / 1e5, Math.round(lat * 1e5) / 1e5]);
@@ -198,7 +216,7 @@ export async function getSegments(
       out[pair] = memSegs.get(pair) ?? null;
       continue;
     }
-    const cachedVal = await cacheGet<Segment | typeof MISS>(`shape:${pair}`);
+    const cachedVal = await cacheGet<Segment | typeof MISS>(`shape2:${pair}`);
     if (cachedVal !== undefined) {
       const seg = cachedVal === MISS ? null : (cachedVal as Segment);
       memRemember(pair, seg);
@@ -217,7 +235,7 @@ export async function getSegments(
       const seg = await fetchSegment(m[1] as ModeClass, m[2], m[3]);
       memRemember(pair, seg);
       out[pair] = seg;
-      await cachePut(`shape:${pair}`, seg ? SEG_TTL : MISS_TTL, seg ?? MISS);
+      await cachePut(`shape2:${pair}`, seg ? SEG_TTL : MISS_TTL, seg ?? MISS);
     } catch (err) {
       // Quota/Rate-Limit: fürs Erste aufhören (kein Miss-Marker — später erneut).
       if (err instanceof OjpError && (err.code === 'quota' || err.status === 429)) break;
