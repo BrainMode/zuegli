@@ -2,9 +2,10 @@ import { mistral } from '@ai-sdk/mistral';
 import {
   streamText,
   convertToModelMessages,
-  stepCountIs,
+  isStepCount,
   createUIMessageStream,
   createUIMessageStreamResponse,
+  toUIMessageStream,
   type UIMessage,
 } from 'ai';
 import { bahnTools } from '@/lib/tools';
@@ -19,6 +20,10 @@ export const maxDuration = 60;
 const MODEL = process.env.MISTRAL_MODEL ?? 'mistral-small-latest';
 const MAX_MESSAGE_CHARS = 1000;
 const MAX_HISTORY = 20;
+// Obergrenze für die ganze mitgeschickte History (inkl. Tool-Ergebnisse) —
+// ca. 30–40k Tokens. Normale Gespräche liegen weit darunter; ohne Deckel
+// könnte ein Client mit aufgeblähter History jeden Call teuer machen.
+const MAX_HISTORY_CHARS = 150_000;
 
 function json(body: unknown, status: number) {
   return new Response(JSON.stringify(body), {
@@ -54,6 +59,43 @@ function lastUserText(messages: UIMessage[]): string {
     .trim();
 }
 
+/**
+ * Bereinigt die vom Client geschickte History, bevor sie ans Modell geht —
+ * der Client ist nicht vertrauenswürdig:
+ *  - nur user/assistant (eingeschleuste system-Nachrichten fliegen raus; das
+ *    AI SDK würde sonst mit einem Fehler abbrechen),
+ *  - in User-Nachrichten nur Text-Parts, je auf MAX_MESSAGE_CHARS gekürzt
+ *    (die UI schickt nie Dateien; sonst gingen z.B. Bilder ans Modell),
+ *  - höchstens MAX_HISTORY Nachrichten und MAX_HISTORY_CHARS insgesamt —
+ *    die ältesten fallen zuerst weg, die letzte Nachricht bleibt immer,
+ *  - die History beginnt mit einer User-Nachricht.
+ */
+function sanitizeHistory(messages: UIMessage[]): UIMessage[] {
+  const clean: UIMessage[] = [];
+  for (const m of messages) {
+    if (!m || !Array.isArray(m.parts)) continue;
+    if (m.role === 'assistant') {
+      clean.push(m);
+    } else if (m.role === 'user') {
+      const parts = m.parts
+        .filter((p) => p.type === 'text' && typeof (p as { text?: unknown }).text === 'string')
+        .map((p) => {
+          const text = (p as { text: string }).text;
+          return { type: 'text' as const, text: text.slice(0, MAX_MESSAGE_CHARS) };
+        });
+      if (parts.length > 0) clean.push({ ...m, parts });
+    }
+  }
+  let out = clean.slice(-MAX_HISTORY);
+  const sizes = out.map((m) => JSON.stringify(m).length);
+  let total = sizes.reduce((a, b) => a + b, 0);
+  while (out.length > 1 && (total > MAX_HISTORY_CHARS || out[0].role !== 'user')) {
+    total -= sizes.shift()!;
+    out = out.slice(1);
+  }
+  return out;
+}
+
 export async function POST(req: Request) {
   // 1) Statische Validierung (0 Kosten)
   let messages: UIMessage[];
@@ -74,8 +116,11 @@ export async function POST(req: Request) {
       400,
     );
   }
-  // History serverseitig begrenzen (Kosten- und Missbrauchsschutz).
-  const trimmed = messages.slice(-MAX_HISTORY);
+  // History serverseitig bereinigen und begrenzen (Kosten- und Missbrauchsschutz).
+  const trimmed = sanitizeHistory(messages);
+  if (trimmed.length === 0 || trimmed[trimmed.length - 1].role !== 'user') {
+    return json({ error: 'invalid', message: 'Ungültige Anfrage.' }, 400);
+  }
 
   // 2) Rate-Limiting VOR jedem Spend
   const verdict = await checkLimits(clientIp(req));
@@ -116,16 +161,23 @@ export async function POST(req: Request) {
 
   const result = streamText({
     model: mistral(MODEL),
-    system: systemPrompt(uiLang),
+    instructions: systemPrompt(uiLang),
     messages: modelMessages,
     tools: bahnTools,
-    stopWhen: stepCountIs(6),
+    stopWhen: isStepCount(6),
     temperature: 0.3,
     maxOutputTokens: 800,
-    onFinish: async ({ usage, text }) => {
+    // AI SDK 7: usage und content umfassen ALLE Schritte (text nur den letzten).
+    onEnd: async ({ usage, content }) => {
       void trackTokens(usage?.inputTokens ?? 0, usage?.outputTokens ?? 0);
-      // Post-Inference-Schicht: erzeugte Antwort gegen die Moderation prüfen.
-      // Geflaggte Outputs werden als Telemetrie geloggt (Red-Team-/Audit-Signal).
+      // Post-Inference-Schicht: den gesamten ausgelieferten Text gegen die
+      // Moderation prüfen. Geflaggte Outputs werden als Telemetrie geloggt
+      // (Red-Team-/Audit-Signal).
+      const text = content
+        .filter((p) => p.type === 'text')
+        .map((p) => (p as { text: string }).text)
+        .join('\n')
+        .trim();
       if (text) {
         const out = await moderateOutput(text);
         if (out.blocked) {
@@ -137,5 +189,7 @@ export async function POST(req: Request) {
     },
   });
 
-  return result.toUIMessageStreamResponse();
+  return createUIMessageStreamResponse({
+    stream: toUIMessageStream({ stream: result.stream, tools: bahnTools }),
+  });
 }
