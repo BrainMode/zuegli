@@ -32,3 +32,6 @@ _private/
 
 .vercel
 .env*
+
+# Vorlage MUSS ins Repo (steht nach den .env*-Mustern, sonst greift sie nicht)
+!.env.example

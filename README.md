@@ -12,7 +12,7 @@ Zügli ist die Schweizer Schwester-App von [Wo bleibt mein Zug?](https://github.
 - **Verbindungen A→B** mit Umstiegen, Verspätungen und Gleisen
 - **„Wo bleibt mein Zug?"** — Live-Zuglauf mit Verspätung pro Halt
 - **Wagenreihung mit Perronsektor** 🇨🇭 — wo hält welcher Wagen (1./2. Klasse, Speisewagen, Velohaken, Rollstuhlplätze), pro Halt mit Sektorangabe
-- **Belegungsprognose** 🇨🇭 — wie voll wird der Zug, je Abschnitt und Klasse (SBB, BLS, Thurbo, SOB). Ein täglicher Cron (`/api/cron/occupancy`, siehe `vercel.json`) importiert das ~140-MB-Tages-ZIP und legt kompakte Blobs (~1 MB) in Redis — braucht deshalb Upstash.
+- **Belegungsprognose** 🇨🇭 — wie voll wird der Zug, je Abschnitt und Klasse (SBB, BLS, Thurbo, SOB). Ein täglicher Cron (`/api/cron/occupancy`, siehe `vercel.json`) importiert das ~140-MB-Tages-ZIP und legt kompakte Blobs (~1 MB) in den geteilten Cache (Vercel Runtime Cache oder optional Upstash Redis).
 - **Störungen** 🇨🇭 — landesweiter Echtzeit-Störungsfeed (SIRI-SX), gefiltert nach Strecke/Bahnhof
 - **Preisauskunft** (Beta) — Normalpreis in CHF für eine Verbindung
 - **100+ Sprachen** — fragt auf Deutsch, Französisch, Italienisch, Englisch, … und bekommt die Antwort in derselben Sprache
@@ -39,7 +39,7 @@ npm run dev
 
 1. **`MISTRAL_API_KEY`** (Pflicht): [console.mistral.ai](https://console.mistral.ai/api-keys) — Mistral Small, EU-Datenhaltung, kostet Rappen.
 2. **`OTD_API_KEY`** (für alle Bahn-Tools): kostenlos im [API-Manager von opentransportdata.swiss](https://api-manager.opentransportdata.swiss/) registrieren und das Produkt **OJP 2.0** abonnieren. Wagenreihung (**Train Formation v2**) und Störungen (**SIRI-SX**) sind eigene API-Produkte — je nach Abo eigene Keys in `OTD_FORMATION_KEY`/`OTD_SIRI_SX_KEY` (Fallback ist `OTD_API_KEY`).
-3. Optional Upstash Redis (Rate-Limiting + geteilter Cache) und Betreiber-Angaben (`OWNER_*`) — siehe `.env.example`.
+3. Optional Upstash Redis (globales Rate-Limiting + geteilter Cache) und Betreiber-Angaben (`OWNER_*`) — siehe `.env.example`. Ohne Redis nutzt die App auf Vercel den Runtime Cache und lokal einen In-Memory-Cache; ist Redis gesperrt oder weg, fällt sie automatisch darauf zurück.
 
 Ohne Keys startet die App trotzdem: Die Tools melden dann ehrlich „nicht konfiguriert".
 
@@ -67,7 +67,7 @@ Lokal testen: `npx @modelcontextprotocol/inspector http://localhost:3000/api/mcp
 
 ## Technik
 
-Next.js (App Router), Vercel AI SDK mit `@ai-sdk/mistral`, `fast-xml-parser` für OJP 2.0 (XML), `mcp-handler`, Tailwind, optional Upstash Redis. Guardrails über die Mistral Moderation API plus einen strikten System-Prompt; die Ausgabe wird zusätzlich geprüft. `npm run test:guardrails` fährt gegen einen laufenden Server ein paar Angriffs- und Normalfälle.
+Next.js (App Router), Vercel AI SDK mit `@ai-sdk/mistral`, `fast-xml-parser` für OJP 2.0 (XML), `mcp-handler`, Tailwind, Vercel Runtime Cache, optional Upstash Redis. Die Live-Karte baut ihren Landes-Snapshot (SIRI-ET) bei Bedarf in der Funktion selbst (~5 s, dann 1 min gemerkt) — ohne Datenbank und ohne Minuten-Cron. Guardrails über die Mistral Moderation API plus einen strikten System-Prompt; die Ausgabe wird zusätzlich geprüft. `npm run test:guardrails` fährt gegen einen laufenden Server ein paar Angriffs- und Normalfälle.
 
 Architektur: Die reinen Datenfunktionen in `lib/sbb/actions.ts` werden doppelt verpackt — als AI-SDK-Tools (`lib/tools.ts`) für den Chat und als MCP-Tools (`lib/mcp-tools.ts`) für den Server. Keine Logik-Duplikation.
 
