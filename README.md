@@ -67,7 +67,7 @@ Lokal testen: `npx @modelcontextprotocol/inspector http://localhost:3000/api/mcp
 
 ## Technik
 
-Next.js (App Router), Vercel AI SDK mit `@ai-sdk/mistral`, `fast-xml-parser` für OJP 2.0 (XML), `mcp-handler`, Tailwind, Vercel Runtime Cache, optional Upstash Redis. Die Live-Karte baut ihren Landes-Snapshot (SIRI-ET) bei Bedarf in der Funktion selbst (~5 s, dann 1 min gemerkt) — ohne Datenbank und ohne Minuten-Cron. Guardrails über die Mistral Moderation API plus einen strikten System-Prompt; die Ausgabe wird zusätzlich geprüft. `npm run test:guardrails` fährt gegen einen laufenden Server ein paar Angriffs- und Normalfälle.
+Next.js (App Router), Vercel AI SDK mit `@ai-sdk/mistral`, `fast-xml-parser` für OJP 2.0 (XML), `mcp-handler`, Tailwind, Vercel Runtime Cache, optional Upstash Redis. Die Live-Karte baut ihren Landes-Snapshot (SIRI-ET) bei Bedarf in der Funktion selbst (~5 s, dann 1 min gemerkt) — ohne Datenbank und ohne Minuten-Cron. Guardrails in Schichten: Rate-Limits pro IP und ein globaler Tages-Cap (Runtime Cache oder Redis), eine serverseitig bereinigte Chat-History (nur Text, keine eingeschleusten System-Nachrichten, Grössendeckel), die Mistral Moderation API für Ein- und Ausgabe und ein strikter System-Prompt. `npm run test:guardrails` fährt gegen einen laufenden Server zehn Angriffs- und Normalfälle (Jailbreak, Prompt-Leak, Injektion, gebündelte Fremdaufträge, Legit-Fragen auf Deutsch und Französisch).
 
 Architektur: Die reinen Datenfunktionen in `lib/sbb/actions.ts` werden doppelt verpackt — als AI-SDK-Tools (`lib/tools.ts`) für den Chat und als MCP-Tools (`lib/mcp-tools.ts`) für den Server. Keine Logik-Duplikation.
 
