@@ -124,6 +124,9 @@ export async function refreshStops(): Promise<{
   const chunks = encodeChunks(JSON.stringify(index));
   for (let i = 0; i < chunks.length; i++) await cachePut(`stops:${i}`, TTL_SEC, chunks[i]);
   await cachePut(`stops:meta`, TTL_SEC, { chunks: chunks.length, updated: Date.now(), kept });
+  // Diese Instanz hat den Index jetzt ohnehin im Speicher — auch wenn das
+  // Schreiben in Redis gerade nicht ging.
+  memIndex = { exp: Date.now() + MEM_TTL_MS, index };
   return {
     rows,
     kept,
@@ -133,27 +136,51 @@ export async function refreshStops(): Promise<{
 }
 
 // In-Memory-Cache pro Instanz (6 h) — der Index ist einige MB gross und wird
-// vom Livemap-Cron jede Minute gebraucht.
+// vom Livemap-Cron jede Minute gebraucht. Ein FEHLENDER Index wird nur kurz
+// gemerkt: früher hielt eine Instanz nach einem einzigen Redis-Fehler 6 h lang
+// an "kein Index" fest und die Karte blieb leer, obwohl Redis längst wieder lief.
+const MEM_TTL_MS = 6 * 3600_000;
+const MISS_TTL_MS = 60_000;
+const REBUILD_COOLDOWN_MS = 15 * 60_000;
 let memIndex: { exp: number; index: StopIndex | null } | null = null;
+let lastRebuild = 0;
 
-export async function loadStopIndex(): Promise<StopIndex | null> {
-  if (memIndex && memIndex.exp > Date.now()) return memIndex.index;
-  let index: StopIndex | null = null;
+async function readIndexFromCache(): Promise<StopIndex | null> {
   try {
     const meta = await cacheGet<{ chunks: number }>(`stops:meta`);
-    if (meta?.chunks) {
-      const parts: string[] = [];
-      for (let i = 0; i < meta.chunks; i++) {
-        const c = await cacheGet<string>(`stops:${i}`);
-        if (!c) throw new Error(`stops:${i} fehlt`);
-        parts.push(c);
-      }
-      index = JSON.parse(strFromU8(gunzipSync(Buffer.from(parts.join(''), 'base64')))) as StopIndex;
+    if (!meta?.chunks) return null;
+    const parts: string[] = [];
+    for (let i = 0; i < meta.chunks; i++) {
+      const c = await cacheGet<string>(`stops:${i}`);
+      if (!c) return null;
+      parts.push(c);
     }
+    return JSON.parse(strFromU8(gunzipSync(Buffer.from(parts.join(''), 'base64')))) as StopIndex;
   } catch {
-    index = null;
+    return null;
   }
-  memIndex = { exp: Date.now() + 6 * 3600_000, index };
+}
+
+/**
+ * Stops-Index aus Speicher → Cache → notfalls frisch aus der Quelle (~4 MB
+ * CSV, wenige Sekunden). Die Selbstheilung macht die Live-Karte unabhängig
+ * davon, ob der Tages-Cron gelaufen ist oder Redis gerade leer/gesperrt ist;
+ * der Cooldown verhindert einen Neuaufbau pro Minute, falls die Quelle hakt.
+ */
+export async function loadStopIndex(): Promise<StopIndex | null> {
+  if (memIndex && memIndex.exp > Date.now()) return memIndex.index;
+  const index = await readIndexFromCache();
+  if (!index && Date.now() - lastRebuild > REBUILD_COOLDOWN_MS) {
+    lastRebuild = Date.now();
+    try {
+      const r = await refreshStops();
+      console.warn(`[stops] Index fehlte im Cache — neu aufgebaut (${r.kept} Halte)`);
+      return memIndex!.index;
+    } catch (err) {
+      console.error('[stops] Neuaufbau fehlgeschlagen:', err instanceof Error ? err.message : err);
+    }
+  }
+  memIndex = { exp: Date.now() + (index ? MEM_TTL_MS : MISS_TTL_MS), index };
   return index;
 }
 

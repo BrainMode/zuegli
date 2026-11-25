@@ -3,36 +3,33 @@
 // Primär: Upstash Redis (Vercel Marketplace, Free Tier) — nur damit funktioniert
 // ein globaler Tages-Cap mit freundlicher Meldung über mehrere Serverless-
 // Instanzen hinweg.
-// Fallback ohne Upstash-Env: In-Memory pro Lambda-Instanz. Reicht für lokale
-// Entwicklung und Forks, die ohne Setup starten sollen — schützt aber NICHT
-// zuverlässig eine öffentliche Produktion (jede Instanz zählt eigenständig).
+// Fallback ohne Upstash-Env ODER wenn Redis gerade nicht antwortet (gesperrt,
+// Limit erreicht, Netzwerk): In-Memory pro Lambda-Instanz. Reicht für lokale
+// Entwicklung und als Notbetrieb — schützt aber NICHT zuverlässig eine
+// öffentliche Produktion (jede Instanz zählt eigenständig).
 
 import { Ratelimit } from '@upstash/ratelimit';
-import { Redis } from '@upstash/redis';
+import { redisClient, redisConfigured, redisCount, redisTry } from './redis';
 
 const PER_IP = Number(process.env.RATE_LIMIT_PER_IP ?? 10); // Nachrichten / 5 min
 const PER_IP_DAY = 40; // Nachrichten / IP / Tag
 const DAILY_CAP = Number(process.env.DAILY_MESSAGE_CAP ?? 1500); // globaler Tages-Cap
 
-const hasUpstash = Boolean(
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
-);
-
 // ── Upstash-Pfad ──────────────────────────────────────────────────────────
-let redis: Redis | null = null;
+// Ratelimit braucht einen Redis-Client; Aufrufe laufen trotzdem über
+// redisTry(), damit ein gesperrtes/fehlendes Redis nie zum 500er wird.
 let ipLimiter: Ratelimit | null = null;
 let ipDayLimiter: Ratelimit | null = null;
 
-if (hasUpstash) {
-  redis = Redis.fromEnv();
+if (redisClient) {
   ipLimiter = new Ratelimit({
-    redis,
+    redis: redisClient,
     limiter: Ratelimit.slidingWindow(PER_IP, '5 m'),
     prefix: 'zuegli:ip5m',
     analytics: false,
   });
   ipDayLimiter = new Ratelimit({
-    redis,
+    redis: redisClient,
     limiter: Ratelimit.slidingWindow(PER_IP_DAY, '1 d'),
     prefix: 'zuegli:ipday',
     analytics: false,
@@ -67,23 +64,29 @@ export type LimitVerdict = { ok: true } | { ok: false; kind: 'ratelimit' | 'budg
 export async function checkLimits(ip: string): Promise<LimitVerdict> {
   const date = today();
 
-  if (hasUpstash && redis && ipLimiter && ipDayLimiter) {
+  if (ipLimiter && ipDayLimiter) {
     // Globaler Tages-Cap
-    const globalKey = `zuegli:global:${date}`;
-    const used = await redis.incr(globalKey);
-    if (used === 1) await redis.expire(globalKey, 90_000);
-    if (used > DAILY_CAP) return { ok: false, kind: 'budget' };
-
-    // Pro-IP-Limits
-    const [win, day] = await Promise.all([
-      ipLimiter.limit(ip),
-      ipDayLimiter.limit(ip),
-    ]);
-    if (!win.success || !day.success) return { ok: false, kind: 'ratelimit' };
-    return { ok: true };
+    const used = await redisCount(`zuegli:global:${date}`, 1, 90_000);
+    if (used !== undefined) {
+      if (used > DAILY_CAP) return { ok: false, kind: 'budget' };
+      // Pro-IP-Limits
+      const limits = await redisTry('ratelimit', () =>
+        Promise.all([ipLimiter!.limit(ip), ipDayLimiter!.limit(ip)]),
+      );
+      if (limits) {
+        const [win, day] = limits;
+        if (!win.success || !day.success) return { ok: false, kind: 'ratelimit' };
+        return { ok: true };
+      }
+    }
+    // Redis nicht erreichbar/gesperrt → unten mit In-Memory weiter (kein 500er).
   }
 
-  // In-Memory-Fallback
+  return memoryCheck(ip, date);
+}
+
+/** In-Memory-Fallback (lokal, Forks ohne Upstash, oder Redis gerade weg). */
+function memoryCheck(ip: string, date: string): LimitVerdict {
   if (memDailyDate !== date) {
     memDailyDate = date;
     memDailyCount = 0;
@@ -98,16 +101,16 @@ export async function checkLimits(ip: string): Promise<LimitVerdict> {
 
 /** Akkumuliert verbrauchte Tokens (für spätere Kostenauswertung). Best effort. */
 export async function trackTokens(inputTokens: number, outputTokens: number): Promise<void> {
-  if (!hasUpstash || !redis) return;
+  if (!redisConfigured) return;
   const date = today();
-  try {
-    await Promise.all([
-      redis.incrby(`zuegli:tok:in:${date}`, inputTokens),
-      redis.incrby(`zuegli:tok:out:${date}`, outputTokens),
-    ]);
-  } catch {
-    // Reporting ist unkritisch — Fehler schlucken.
-  }
+  // Ein Round-Trip statt zwei; Fehler schluckt redisTry (Reporting ist unkritisch).
+  await redisTry('trackTokens', (r) =>
+    r
+      .pipeline()
+      .incrby(`zuegli:tok:in:${date}`, inputTokens)
+      .incrby(`zuegli:tok:out:${date}`, outputTokens)
+      .exec(),
+  );
 }
 
 /** Ermittelt die Client-IP aus den üblichen Proxy-Headern. */

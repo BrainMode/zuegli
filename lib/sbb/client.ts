@@ -6,7 +6,7 @@
 // und dokumentierte Quotas (Gratis-Tier: 50 req/min, 20'000 req/Tag).
 
 import { XMLParser } from 'fast-xml-parser';
-import { Redis } from '@upstash/redis';
+import { countWithFallback } from '../redis';
 
 const OJP_ENDPOINT = process.env.OTD_OJP_ENDPOINT ?? 'https://api.opentransportdata.swiss/ojp20';
 const REQUESTOR_REF = 'zuegli';
@@ -52,10 +52,6 @@ export function txt(node: unknown): string | null {
 }
 
 // ── Tages-Budget (Soft-Cap unter der 20k-Quote des Gratis-Tiers) ────────────
-const hasUpstash = Boolean(
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
-);
-const redis = hasUpstash ? Redis.fromEnv() : null;
 const DAILY_CAP = Number(process.env.OTD_DAILY_CAP ?? 18_000);
 
 export const QUOTA_ERROR = {
@@ -65,15 +61,11 @@ export const QUOTA_ERROR = {
 
 /** Zählt Upstream-Requests pro Tag; wirft OjpError('quota') über dem Soft-Cap. Best effort. */
 async function checkDailyBudget(): Promise<void> {
-  if (!redis) return; // ohne Upstash kein globaler Zähler — lokal/Forks unkritisch
-  try {
-    const key = `zuegli:otd:req:${new Date().toISOString().slice(0, 10)}`;
-    const used = await redis.incr(key);
-    if (used === 1) await redis.expire(key, 90_000);
-    if (used > DAILY_CAP) throw new OjpError('OTD-Tageskontingent erschöpft', 'quota');
-  } catch (err) {
-    if (err instanceof OjpError) throw err;
-    // Redis-Fehler nicht zum Request-Fehler machen.
+  // Ohne (erreichbares) Redis zählt jede Instanz für sich — grober Deckel im Notbetrieb.
+  const key = `zuegli:otd:req:${new Date().toISOString().slice(0, 10)}`;
+  const used = await countWithFallback(key, 1, 90_000);
+  if (used > DAILY_CAP) {
+    throw new OjpError('OTD-Tageskontingent erschöpft', 'quota');
   }
 }
 

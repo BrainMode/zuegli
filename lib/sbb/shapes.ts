@@ -11,14 +11,9 @@
 // die ersten Betriebstage von selbst. Unpaarbare Segmente (Umstieg nötig,
 // Ausland) werden als null-Marker gecacht, damit nichts erneut anfragt.
 
-import { Redis } from '@upstash/redis';
-import { cachePut, cacheGet } from '../cache';
+import { cachePut, cacheGetMany } from '../cache';
+import { countWithFallback } from '../redis';
 import { ojpRequest, arr, txt, OjpError } from './client';
-
-const hasUpstash = Boolean(
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
-);
-const redis = hasUpstash ? Redis.fromEnv() : null;
 
 // Globaler Minuten-Deckel fürs Segment-Lernen: Die OJP-API erlaubt 50 req/min
 // GETEILT mit dem Chat — ohne Deckel hungert das Lernen im 429 und drosselt
@@ -26,15 +21,8 @@ const redis = hasUpstash ? Redis.fromEnv() : null;
 const SHAPE_PER_MIN = Number(process.env.SHAPE_LEARN_PER_MIN ?? 20);
 
 async function underMinuteCap(n: number): Promise<boolean> {
-  if (!redis) return true;
-  try {
-    const key = `zuegli:shape:rate:${Math.floor(Date.now() / 60_000)}`;
-    const used = await redis.incrby(key, n);
-    if (used === n) await redis.expire(key, 120);
-    return used <= SHAPE_PER_MIN;
-  } catch {
-    return true;
-  }
+  const key = `zuegli:shape:rate:${Math.floor(Date.now() / 60_000)}`;
+  return (await countWithFallback(key, n, 120)) <= SHAPE_PER_MIN;
 }
 
 const stamp = () => new Date().toISOString();
@@ -211,12 +199,17 @@ export async function getSegments(
 ): Promise<Record<string, Segment | null>> {
   const out: Record<string, Segment | null> = {};
   let fetched = 0;
+  // Alle nicht im Instanz-Speicher bekannten Paare mit EINEM MGET nachschlagen
+  // (vorher ein GET pro Paar — bis zu 40 Redis-Befehle pro Karten-Tick).
+  const unknown = pairs.filter((p) => !memSegs.has(p));
+  const fromCache = await cacheGetMany<Segment | typeof MISS>(unknown.map((p) => `shape2:${p}`));
+  const cachedByPair = new Map(unknown.map((p, i) => [p, fromCache[i]]));
   for (const pair of pairs) {
     if (memSegs.has(pair)) {
       out[pair] = memSegs.get(pair) ?? null;
       continue;
     }
-    const cachedVal = await cacheGet<Segment | typeof MISS>(`shape2:${pair}`);
+    const cachedVal = cachedByPair.get(pair);
     if (cachedVal !== undefined) {
       const seg = cachedVal === MISS ? null : (cachedVal as Segment);
       memRemember(pair, seg);

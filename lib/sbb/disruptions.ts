@@ -12,9 +12,9 @@
 // den Cache. getDisruptions liest nur noch den Blob. Ein harter Tageszähler
 // (Puffer unter 48) schützt zusätzlich vor Smoke-Tests/Restarts.
 
-import { Redis } from '@upstash/redis';
 import { gzipSync, gunzipSync, strFromU8, strToU8 } from 'fflate';
 import { cachePut, cacheGet } from '../cache';
+import { countWithFallback } from '../redis';
 import { ojpParser, arr, txt, OjpError } from './client';
 
 const SIRI_SX_URL =
@@ -28,11 +28,6 @@ const BLOB_KEY = 'sirisx:blob';
 const STALE_KEY = 'sirisx:stale';
 const SSXU_BLOB_KEY = 'sirisxu:blob';
 const SSXU_STALE_KEY = 'sirisxu:stale';
-
-const hasUpstash = Boolean(
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
-);
-const redis = hasUpstash ? Redis.fromEnv() : null;
 
 export type Situation = {
   id: string;
@@ -49,15 +44,9 @@ export type Situation = {
 
 /** Harter Tageszähler je Feed. true = Fetch erlaubt. */
 async function underDailyCap(counter: string, cap: number): Promise<boolean> {
-  if (!redis) return true; // lokal/Fork ohne Redis: Cron-Kadenz allein schützt
-  try {
-    const key = `zuegli:${counter}:fetches:${new Date().toISOString().slice(0, 10)}`;
-    const used = await redis.incr(key);
-    if (used === 1) await redis.expire(key, 90_000);
-    return used <= cap;
-  } catch {
-    return true;
-  }
+  const key = `zuegli:${counter}:fetches:${new Date().toISOString().slice(0, 10)}`;
+  // Ohne (erreichbares) Redis zählt die Instanz; die Cron-Kadenz schützt zusätzlich.
+  return (await countWithFallback(key, 1, 90_000)) <= cap;
 }
 
 /** Holt einen SIRI-Feed (folgt Redirects auf signierte URLs) und entpackt gzip. */
