@@ -3,9 +3,10 @@ import { readTier, findTrain } from '@/lib/sbb/livemap';
 // Öffentliche Datenquelle der Live-Karte.
 //  ?tier=1..4  → kompletter Tier-Snapshot als gzip-Pass-through (CDN-cachebar)
 //  ?ref=<journeyRef> → einzelner Zug (für die Chat-Routen-Karten)
-// Der Snapshot wird bei Bedarf in dieser Instanz gebaut (~5 s, siehe livemap.ts).
+// Der Snapshot wird bei Bedarf in dieser Instanz gebaut (~5–20 s, bei
+// Feed-Rate-Limit plus bis zu ~1 min Wartezeit — siehe livemap.ts).
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function GET(req: Request) {
   const url = new URL(req.url);

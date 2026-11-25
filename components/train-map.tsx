@@ -141,10 +141,15 @@ export default function TrainMap() {
       return [1, 2, 3, 4].filter((t) => z >= TIER_MIN_ZOOM[t]);
     };
 
-    const fetchTier = async (t: number) => {
+    const fetchTier = async (t: number, retry = true): Promise<void> => {
       try {
         const res = await fetch(`/api/trains?tier=${t}`);
-        if (!res.ok) return;
+        if (!res.ok) {
+          // 503 = Snapshot noch nicht da (kalte Instanz, Feed-Limit) — bald
+          // nochmals versuchen statt erst beim 60-s-Refresh.
+          if (retry && !disposed) setTimeout(() => void fetchTier(t, false), 10_000);
+          return;
+        }
         const data = (await res.json()) as { t: number; trains: LiveTrain[] };
         tiersData.current.set(t, {
           t: data.t,
@@ -156,18 +161,25 @@ export default function TrainMap() {
       }
     };
 
+    // Tiers NACHEINANDER laden: parallele Requests landen sonst auf mehreren
+    // kalten Server-Instanzen, die je den SIRI-ET-Feed holen (2 Abrufe/min).
+    let tierQueue: Promise<void> = Promise.resolve();
+    const queueTier = (t: number) => {
+      tierQueue = tierQueue.then(() => fetchTier(t));
+    };
+
     const ensureTiers = () => {
       for (const t of wantedTiers()) {
         if (!activeTiers.current.has(t)) {
           activeTiers.current.add(t);
-          void fetchTier(t);
+          queueTier(t);
         }
       }
     };
 
     const refreshActive = () => {
       if (document.hidden) return;
-      for (const t of activeTiers.current) void fetchTier(t);
+      for (const t of activeTiers.current) queueTier(t);
     };
 
     // Fahrweg-Segmente nachladen: alle 2.5 s bis zu 40 der gerade gebrauchten

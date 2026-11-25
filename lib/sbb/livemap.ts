@@ -56,10 +56,16 @@ function classify(mode: string, line: string, product: string): 1 | 2 | 3 | 4 {
   return 4; // bus, water, übrige
 }
 
-async function fetchSiriEt(): Promise<string> {
+// Der Feed erlaubt 2 Abrufe pro Minute und Key (X-Ratelimit-Limit: 2).
+// Bauen zwei kalte Instanzen gleichzeitig, bekommt die dritte 429 — dann bis
+// zum gemeldeten Reset warten (Fenster 60 s → max. 65 s; maxDuration der Route
+// ist 120 s) und einmal neu versuchen, statt dem Client 503 zu liefern.
+const MAX_429_WAIT_MS = 65_000;
+
+async function fetchSiriEt(retryOn429 = true): Promise<string> {
   const key = process.env.OTD_SIRIET_KEY;
   if (!key) throw new Error('OTD_SIRIET_KEY fehlt');
-  // Bewusst KEIN otdGet: 1440 Läufe/Tag dürfen das geteilte OJP-Tagesbudget
+  // Bewusst KEIN otdGet: Karten-Abrufe dürfen das geteilte OJP-Tagesbudget
   // nicht verbrauchen; der Feed hat sein eigenes Kontingent.
   const res = await fetch(SIRI_ET_URL, {
     headers: {
@@ -68,6 +74,15 @@ async function fetchSiriEt(): Promise<string> {
     },
     signal: AbortSignal.timeout(120_000),
   });
+  if (res.status === 429 && retryOn429) {
+    const reset = Number(res.headers.get('x-ratelimit-reset'));
+    const waitMs = Number.isFinite(reset) && reset > 0 ? reset * 1000 - Date.now() + 500 : 20_000;
+    await res.body?.cancel();
+    if (waitMs <= MAX_429_WAIT_MS) {
+      await new Promise((r) => setTimeout(r, Math.max(waitMs, 1000)));
+      return fetchSiriEt(false);
+    }
+  }
   if (!res.ok) throw new Error(`SIRI-ET HTTP ${res.status}`);
   const bytes = new Uint8Array(await res.arrayBuffer());
   return strFromU8(bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes);
@@ -169,11 +184,13 @@ function maxAgeSec(now: Date): number {
 }
 
 async function buildSnapshot(): Promise<Snapshot> {
-  const nowSec = Math.round(Date.now() / 1000);
+  const started = Date.now();
   const stops = await loadStopIndex();
   if (!stops) throw new Error('Stops-Index nicht verfügbar (Quelle und Cache leer)');
 
   const xml = await fetchSiriEt();
+  // Zeitbasis NACH dem Abruf (ein 429-Retry kann bis zu einer Minute warten).
+  const nowSec = Math.round(Date.now() / 1000);
   const buckets: Record<TierNum, LiveTrain[]> = { 1: [], 2: [], 3: [], 4: [] };
   let journeys = 0;
   let mapped = 0;
@@ -208,7 +225,7 @@ async function buildSnapshot(): Promise<Snapshot> {
     tiers[t] = { gz, trains };
     stats[`t${t}`] = { trains: trains.length, kB: Math.round(gz.length / 1024) };
   }
-  console.log('[livemap] Snapshot gebaut', JSON.stringify({ journeys, mapped, ms: Date.now() - nowSec * 1000, ...stats }));
+  console.log('[livemap] Snapshot gebaut', JSON.stringify({ journeys, mapped, ms: Date.now() - started, ...stats }));
   return { t: nowSec, tiers };
 }
 
