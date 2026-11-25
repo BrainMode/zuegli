@@ -1,22 +1,33 @@
 // Live-Karten-Pipeline: SIRI-ET (Landes-Snapshot aller ÖV-Fahrten, ~40–100 MB
 // XML, KEINE Koordinaten) → Chunk-Parse → Koordinaten-Join via Stops-Index →
-// 4 kompakte Tier-Blobs in Redis. Der Client interpoliert Positionen aus den
-// absoluten Halt-Zeiten (Luftlinie zwischen Halten, v1).
+// 4 kompakte, gzip-komprimierte Tier-Snapshots. Der Client interpoliert
+// Positionen aus den absoluten Halt-Zeiten (Luftlinie zwischen Halten, v1).
 //
 // Tiers (zoomgestuft ladbar): 1 Fernverkehr-rail, 2 Regio-rail, 3 tram/metro,
-// 4 bus/übrige. Läuft im Minuten-Cron — Kosten-Bremsen: Nachtdrossel
-// (01:00–04:30 nur jeder 5. Lauf), Overlap-Guard/Kadenz via
-// LIVEMAP_MIN_INTERVAL_SEC (Default 55 s; Feed-Policy erlaubt 30 s).
+// 4 bus/übrige.
+//
+// Architektur (seit 11/2026): Der Snapshot wird ON DEMAND in der Instanz
+// gebaut, die /api/trains bedient (~5 s), und dort für MIN_INTERVAL_SEC
+// gemerkt (nachts 5 min). Vorher schrieb ein Minuten-Cron jede Minute ~2.7 MB
+// (doppelt, mit Stale-Kopie) nach Upstash — ~7 GB/Tag gegen 10 GB/Monat im
+// Free-Tier; die gesperrte Datenbank hat dann Chat und Karte lahmgelegt.
+// Jetzt: kein Redis, kein Cron, und ohne Kartenbesucher auch kein SIRI-ET-Abruf.
+// Ältere Snapshots (< 30 min) werden sofort ausgeliefert, während im
+// Hintergrund neu gebaut wird (stale-while-revalidate, via waitUntil).
 
+import { waitUntil } from '@vercel/functions';
 import { gzipSync, gunzipSync, strFromU8, strToU8 } from 'fflate';
-import { cachePut, cacheGet } from '../cache';
 import { ojpParser, arr, txt } from './client';
 import { loadStopIndex, resolveStop, stopKey, type StopIndex } from './stops';
 
 const SIRI_ET_URL = process.env.OTD_SIRIET_URL ?? 'https://api.opentransportdata.swiss/la/siri-et';
 const MIN_INTERVAL_SEC = Number(process.env.LIVEMAP_MIN_INTERVAL_SEC ?? 55);
+const NIGHT_INTERVAL_SEC = 300;
+const STALE_MAX_SEC = 30 * 60;
+const RETRY_AFTER_FAILURE_MS = 30_000;
 const WINDOW_PAST_SEC = 10 * 60;
 const WINDOW_FUTURE_SEC = 60 * 60;
+// Payload-Bremse für den Client: Tier 4 (Busse) wird sonst > 3 MB pro Abruf.
 const BLOB_LIMIT = 900 * 1024;
 
 // 5. Element: kanonischer Halt-Key (sloid-Tail) — Join-Key für Fahrweg-Segmente.
@@ -136,37 +147,34 @@ function compactJourney(j: Pt, stops: StopIndex, nowSec: number, futureSec: numb
   };
 }
 
-function encodeTier(tier: LiveTier): string {
-  return Buffer.from(gzipSync(strToU8(JSON.stringify(tier)), { level: 6 })).toString('base64');
+type TierNum = 1 | 2 | 3 | 4;
+type Snapshot = {
+  t: number; // Unix-Sekunden des Baus (Client zeigt "veraltet" ab 180 s)
+  tiers: Record<TierNum, { gz: Uint8Array; trains: LiveTrain[] }>;
+};
+
+function encodeTier(tier: LiveTier): Uint8Array {
+  return gzipSync(strToU8(JSON.stringify(tier)), { level: 6 });
 }
 
-function inNightThrottle(now: Date): boolean {
+function zurichMinutes(now: Date): number {
   const zurich = new Date(now.toLocaleString('sv-SE', { timeZone: 'Europe/Zurich' }).replace(' ', 'T'));
-  const mins = zurich.getHours() * 60 + zurich.getMinutes();
-  // 01:00–04:30: kaum Verkehr → nur jeder 5. Lauf.
-  return mins >= 60 && mins < 270 && zurich.getMinutes() % 5 !== 0;
+  return zurich.getHours() * 60 + zurich.getMinutes();
 }
 
-export async function refreshLiveMap(): Promise<{
-  skipped?: string;
-  journeys?: number;
-  mapped?: number;
-  tiers?: Record<string, { trains: number; blobKB: number }>;
-}> {
+/** Maximales Snapshot-Alter: 01:00–04:30 kaum Verkehr → 5 min, sonst ~1 min. */
+function maxAgeSec(now: Date): number {
+  const mins = zurichMinutes(now);
+  return mins >= 60 && mins < 270 ? NIGHT_INTERVAL_SEC : MIN_INTERVAL_SEC;
+}
+
+async function buildSnapshot(): Promise<Snapshot> {
   const nowSec = Math.round(Date.now() / 1000);
-  if (inNightThrottle(new Date())) return { skipped: 'nachtdrossel' };
-
-  const last = await cacheGet<number>('livemap:last');
-  if (last && nowSec - last < MIN_INTERVAL_SEC) return { skipped: `overlap (${nowSec - last}s)` };
-  await cachePut('livemap:last', 300, nowSec);
-
   const stops = await loadStopIndex();
-  if (!stops) {
-    throw new Error('Stops-Index fehlt — zuerst /api/cron/stops laufen lassen');
-  }
+  if (!stops) throw new Error('Stops-Index nicht verfügbar (Quelle und Cache leer)');
 
   const xml = await fetchSiriEt();
-  const buckets: Record<1 | 2 | 3 | 4, LiveTrain[]> = { 1: [], 2: [], 3: [], 4: [] };
+  const buckets: Record<TierNum, LiveTrain[]> = { 1: [], 2: [], 3: [], 4: [] };
   let journeys = 0;
   let mapped = 0;
   const re = /<EstimatedVehicleJourney>[\s\S]*?<\/EstimatedVehicleJourney>/g;
@@ -185,55 +193,89 @@ export async function refreshLiveMap(): Promise<{
     }
   }
 
-  const tiers: Record<string, { trains: number; blobKB: number }> = {};
+  const tiers = {} as Snapshot['tiers'];
+  const stats: Record<string, { trains: number; kB: number }> = {};
   for (const t of [1, 2, 3, 4] as const) {
-    let tier: LiveTier = { t: nowSec, trains: buckets[t] };
-    let blob = encodeTier(tier);
-    if (blob.length > BLOB_LIMIT) {
-      // Guard: Zukunftsfenster schrumpfen (Upstash 1 MB/Command).
-      const shrunk = buckets[t]
+    let trains = buckets[t];
+    let gz = encodeTier({ t: nowSec, trains });
+    if (gz.length > BLOB_LIMIT) {
+      // Zukunftsfenster schrumpfen, damit der Client nicht Megabytes pro Minute lädt.
+      trains = trains
         .map((tr) => ({ ...tr, c: tr.c.filter(([, , a]) => a <= nowSec + 40 * 60) }))
         .filter((tr) => tr.c.length >= 2);
-      tier = { t: nowSec, trains: shrunk };
-      blob = encodeTier(tier);
-      console.warn(`[livemap] Tier ${t} > 900 KB — Fenster auf +40 min geschrumpft (${Math.round(blob.length / 1024)} KB)`);
+      gz = encodeTier({ t: nowSec, trains });
     }
-    await cachePut(`livemap:t${t}`, 300, blob);
-    await cachePut(`livemap:stale:t${t}`, 1800, blob);
-    tiers[`t${t}`] = { trains: tier.trains.length, blobKB: Math.round(blob.length / 1024) };
+    tiers[t] = { gz, trains };
+    stats[`t${t}`] = { trains: trains.length, kB: Math.round(gz.length / 1024) };
   }
-  await cachePut('livemap:meta', 300, { t: nowSec, tiers });
-  return { journeys, mapped, tiers };
+  console.log('[livemap] Snapshot gebaut', JSON.stringify({ journeys, mapped, ms: Date.now() - nowSec * 1000, ...stats }));
+  return { t: nowSec, tiers };
+}
+
+// ── Snapshot-Verwaltung pro Instanz ─────────────────────────────────────────
+
+let current: Snapshot | null = null;
+let building: Promise<Snapshot> | null = null;
+let lastFailure = 0;
+
+function startBuild(): Promise<Snapshot> | null {
+  if (building) return building;
+  if (Date.now() - lastFailure < RETRY_AFTER_FAILURE_MS) return null;
+  building = buildSnapshot()
+    .then((s) => {
+      current = s;
+      return s;
+    })
+    .catch((err) => {
+      lastFailure = Date.now();
+      console.error('[livemap] Snapshot-Bau fehlgeschlagen:', err instanceof Error ? err.message : err);
+      throw err;
+    })
+    .finally(() => {
+      building = null;
+    });
+  return building;
+}
+
+/**
+ * Aktueller Snapshot: frisch aus dem Speicher, sonst älterer (< 30 min) sofort
+ * plus Neubau im Hintergrund, sonst Neubau abwarten. null = keine Daten.
+ */
+async function getSnapshot(): Promise<Snapshot | null> {
+  const age = current ? Date.now() / 1000 - current.t : Infinity;
+  if (current && age < maxAgeSec(new Date())) return current;
+
+  const job = startBuild();
+  if (current && age < STALE_MAX_SEC) {
+    if (job) waitUntil(job.catch(() => undefined));
+    return current;
+  }
+  if (!job) return null; // letzter Bau scheiterte vor < 30 s und nichts Brauchbares im Speicher
+  try {
+    return await job;
+  } catch {
+    return null;
+  }
 }
 
 // ── Lese-Seite (API-Route) ──────────────────────────────────────────────────
 
-const memTiers = new Map<number, { exp: number; blob: string | null }>();
-
-/** Roh-Blob (gzip/base64) eines Tiers — für gzip-Pass-through in /api/trains. */
-export async function readTierBlob(t: 1 | 2 | 3 | 4): Promise<string | null> {
-  const hit = memTiers.get(t);
-  if (hit && hit.exp > Date.now()) return hit.blob;
-  const blob =
-    (await cacheGet<string>(`livemap:t${t}`)) ?? (await cacheGet<string>(`livemap:stale:t${t}`)) ?? null;
-  memTiers.set(t, { exp: Date.now() + 20_000, blob });
-  return blob;
-}
-
-export function decodeTier(blob: string): LiveTier {
-  return JSON.parse(strFromU8(gunzipSync(Buffer.from(blob, 'base64')))) as LiveTier;
+/** gzip-Bytes eines Tiers — für gzip-Pass-through in /api/trains. */
+export async function readTier(t: TierNum): Promise<Uint8Array | null> {
+  const snap = await getSnapshot();
+  return snap ? snap.tiers[t].gz : null;
 }
 
 /** Einzelnen Zug per journeyRef(-Prefix) über alle Tiers suchen (für Chat-Karten). */
 export async function findTrain(refPrefix: string): Promise<{ t: number; train: LiveTrain } | null> {
+  const snap = await getSnapshot();
+  if (!snap) return null;
   for (const t of [1, 2, 3, 4] as const) {
-    const blob = await readTierBlob(t);
-    if (!blob) continue;
-    const tier = decodeTier(blob);
+    const trains = snap.tiers[t].trains;
     const train =
-      tier.trains.find((tr) => tr.r === refPrefix) ??
-      tier.trains.find((tr) => tr.r.startsWith(refPrefix) || refPrefix.startsWith(tr.r));
-    if (train) return { t: tier.t, train };
+      trains.find((tr) => tr.r === refPrefix) ??
+      trains.find((tr) => tr.r.startsWith(refPrefix) || refPrefix.startsWith(tr.r));
+    if (train) return { t: snap.t, train };
   }
   return null;
 }

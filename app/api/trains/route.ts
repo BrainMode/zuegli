@@ -1,9 +1,11 @@
-import { readTierBlob, findTrain } from '@/lib/sbb/livemap';
+import { readTier, findTrain } from '@/lib/sbb/livemap';
 
 // Öffentliche Datenquelle der Live-Karte.
 //  ?tier=1..4  → kompletter Tier-Snapshot als gzip-Pass-through (CDN-cachebar)
 //  ?ref=<journeyRef> → einzelner Zug (für die Chat-Routen-Karten)
+// Der Snapshot wird bei Bedarf in dieser Instanz gebaut (~5 s, siehe livemap.ts).
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -26,13 +28,15 @@ export async function GET(req: Request) {
   if (![1, 2, 3, 4].includes(tierNum)) {
     return Response.json({ error: 'tier muss 1–4 sein' }, { status: 400 });
   }
-  const blob = await readTierBlob(tierNum as 1 | 2 | 3 | 4);
-  if (!blob) {
-    return Response.json({ error: 'keine_daten' }, { status: 503 });
+  const gz = await readTier(tierNum as 1 | 2 | 3 | 4);
+  if (!gz) {
+    return Response.json(
+      { error: 'keine_daten' },
+      { status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '30' } },
+    );
   }
-  // Blob ist bereits gzip — direkt durchreichen spart Re-Kompression und Bytes.
-  const bytes = Buffer.from(blob, 'base64');
-  return new Response(new Uint8Array(bytes), {
+  // Snapshot ist bereits gzip — direkt durchreichen spart Re-Kompression und Bytes.
+  return new Response(new Uint8Array(gz), {
     headers: {
       'Content-Type': 'application/json',
       'Content-Encoding': 'gzip',
