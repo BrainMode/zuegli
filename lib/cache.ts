@@ -79,6 +79,43 @@ export async function cacheGetMany<T>(keys: string[]): Promise<(T | undefined)[]
   );
 }
 
+// Instanz-lokale Untergrenze für sharedCount (zählt auch, wenn der Runtime
+// Cache gerade nicht antwortet).
+const localCounts = new Map<string, { n: number; exp: number }>();
+
+/**
+ * Ungefährer, instanzübergreifender Zähler ohne Redis (für Missbrauchs-Deckel
+ * wie das Chat-Rate-Limit). Der Runtime Cache kennt kein atomares INCR, daher
+ * Read-Modify-Write: Treffen auf ZWEI Instanzen im selben Moment Requests ein,
+ * kann einer verloren gehen — der Deckel greift dann ein, zwei Nachrichten
+ * später. Der Instanz-Zähler ist die Untergrenze, damit ein ausgefallener
+ * Cache nie „unbegrenzt" bedeutet. Kosten: 1 Read + 1 Write pro Aufruf.
+ */
+export async function sharedCount(key: string, ttlSec: number): Promise<number> {
+  const k = `zuegli:count:${key}`;
+  const now = Date.now();
+  let local = localCounts.get(k);
+  if (!local || local.exp < now) {
+    if (localCounts.size > 5000) localCounts.clear();
+    local = { n: 0, exp: now + ttlSec * 1000 };
+    localCounts.set(k, local);
+  }
+  let shared = 0;
+  try {
+    shared = Number(await runtime.get(k)) || 0;
+  } catch {
+    // Cache nicht erreichbar → nur der Instanz-Zähler
+  }
+  const used = Math.max(local.n, shared) + 1;
+  local.n = used;
+  try {
+    await runtime.set(k, used, { ttl: ttlSec });
+  } catch {
+    // best effort
+  }
+  return used;
+}
+
 // Request-Coalescing: Läuft für denselben Key bereits ein Fetch in dieser
 // Instanz, teilen sich alle Aufrufer dessen Promise statt parallel die API zu
 // treffen. Entscheidend für den landesweiten SIRI-SX-Feed (ein großer Fetch,

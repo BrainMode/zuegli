@@ -1,14 +1,20 @@
 // Rate-Limiting & Kostenschutz für die öffentliche Demo.
 //
-// Primär: Upstash Redis (Vercel Marketplace, Free Tier) — nur damit funktioniert
-// ein globaler Tages-Cap mit freundlicher Meldung über mehrere Serverless-
-// Instanzen hinweg.
-// Fallback ohne Upstash-Env ODER wenn Redis gerade nicht antwortet (gesperrt,
-// Limit erreicht, Netzwerk): In-Memory pro Lambda-Instanz. Reicht für lokale
-// Entwicklung und als Notbetrieb — schützt aber NICHT zuverlässig eine
-// öffentliche Produktion (jede Instanz zählt eigenständig).
+// Zwei Pfade, beide instanzübergreifend:
+//  1. Upstash Redis, falls konfiguriert UND erreichbar: exakte Sliding-Window-
+//     Limits über @upstash/ratelimit.
+//  2. Sonst (Standard in Production seit 11/2026): Zähler im Vercel Runtime
+//     Cache (lib/cache.ts → sharedCount). Feste Fenster und Read-Modify-Write,
+//     also auf ein, zwei Nachrichten ungenau — als Missbrauchs- und
+//     Kostendeckel reicht das. Lokal (npm run dev) ist der Runtime Cache ein
+//     In-Memory-Cache, die Limits gelten also auch dort.
+// Ist Redis gesperrt oder weg, fällt checkLimits automatisch auf Pfad 2
+// zurück — nie ein 500er. Die harte Kostenbremse bleibt das Budget-Limit im
+// Mistral-Konto.
 
+import { createHash } from 'node:crypto';
 import { Ratelimit } from '@upstash/ratelimit';
+import { sharedCount } from './cache';
 import { redisClient, redisConfigured, redisCount, redisTry } from './redis';
 
 const PER_IP = Number(process.env.RATE_LIMIT_PER_IP ?? 10); // Nachrichten / 5 min
@@ -36,26 +42,13 @@ if (redisClient) {
   });
 }
 
-// ── In-Memory-Fallback ──────────────────────────────────────────────────────
-type Bucket = { count: number; resetAt: number };
-const memWindows = new Map<string, Bucket>();
-let memDailyDate = '';
-let memDailyCount = 0;
-
-function memoryLimit(key: string, limit: number, windowMs: number): boolean {
-  const now = Date.now();
-  const b = memWindows.get(key);
-  if (!b || b.resetAt < now) {
-    memWindows.set(key, { count: 1, resetAt: now + windowMs });
-    return true;
-  }
-  if (b.count >= limit) return false;
-  b.count += 1;
-  return true;
-}
-
 function today(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** IP nur gehasht als Cache-Key — keine Klartext-IPs im Speicher. */
+function ipId(ip: string): string {
+  return createHash('sha256').update(`zuegli:${ip}`).digest('hex').slice(0, 16);
 }
 
 export type LimitVerdict = { ok: true } | { ok: false; kind: 'ratelimit' | 'budget' };
@@ -79,23 +72,23 @@ export async function checkLimits(ip: string): Promise<LimitVerdict> {
         return { ok: true };
       }
     }
-    // Redis nicht erreichbar/gesperrt → unten mit In-Memory weiter (kein 500er).
+    // Redis nicht erreichbar/gesperrt → Runtime-Cache-Pfad (kein 500er).
   }
 
-  return memoryCheck(ip, date);
+  return sharedCheck(ip, date);
 }
 
-/** In-Memory-Fallback (lokal, Forks ohne Upstash, oder Redis gerade weg). */
-function memoryCheck(ip: string, date: string): LimitVerdict {
-  if (memDailyDate !== date) {
-    memDailyDate = date;
-    memDailyCount = 0;
-  }
-  memDailyCount += 1;
-  if (memDailyCount > DAILY_CAP) return { ok: false, kind: 'budget' };
-  if (!memoryLimit(`ip5m:${ip}`, PER_IP, 5 * 60_000)) return { ok: false, kind: 'ratelimit' };
-  if (!memoryLimit(`ipday:${ip}`, PER_IP_DAY, 24 * 60 * 60_000))
-    return { ok: false, kind: 'ratelimit' };
+/** Runtime-Cache-Pfad: feste Fenster (5 min / Tag), instanzübergreifend. */
+async function sharedCheck(ip: string, date: string): Promise<LimitVerdict> {
+  const id = ipId(ip);
+  const window5m = Math.floor(Date.now() / 300_000);
+  const [global, perWindow, perDay] = await Promise.all([
+    sharedCount(`global:${date}`, 90_000),
+    sharedCount(`ip5m:${id}:${window5m}`, 600),
+    sharedCount(`ipday:${id}:${date}`, 90_000),
+  ]);
+  if (global > DAILY_CAP) return { ok: false, kind: 'budget' };
+  if (perWindow > PER_IP || perDay > PER_IP_DAY) return { ok: false, kind: 'ratelimit' };
   return { ok: true };
 }
 
